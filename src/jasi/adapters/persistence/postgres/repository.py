@@ -3,15 +3,18 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from jasi.adapters.persistence.postgres.db import (
     Conversation,
+    InitiativeState,
     Message,
     OutboxMessage,
     ToolExecution,
     Turn,
+    WorkItem,
 )
 from jasi.domain.models import ConversationRecord, MessageRecord, OutboxRecord
 from jasi.runtime.models import ToolExecutionRecord, TurnResult, TurnStart, Usage
@@ -203,11 +206,12 @@ class SQLAlchemyRepository:
     async def mark_outbox_sent(self, outbox_id: int, external_message_id: str | None) -> None:
         async with self._session_factory.begin() as session:
             row = await self._get_outbox_for_update(session, outbox_id)
+            now = datetime.now(UTC)
             row.status = "sent"
-            row.sent_at = datetime.now(UTC)
+            row.sent_at = now
             row.external_message_id = external_message_id
             row.last_error = None
-            row.updated_at = datetime.now(UTC)
+            row.updated_at = now
 
             remaining = await session.scalar(
                 select(func.count())
@@ -223,6 +227,31 @@ class SQLAlchemyRepository:
                     .where(Message.id == row.message_id)
                     .values(delivery_status="sent")
                 )
+                work = (
+                    await session.scalars(
+                        select(WorkItem).where(WorkItem.output_message_id == row.message_id)
+                    )
+                ).one_or_none()
+                if work is not None and work.conversation_id is not None:
+                    await session.execute(
+                        pg_insert(InitiativeState)
+                        .values(
+                            session_id=work.session_id,
+                            conversation_id=work.conversation_id,
+                            last_delivery_at=now,
+                            updated_at=now,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=[InitiativeState.session_id],
+                            set_={
+                                "last_delivery_at": func.greatest(
+                                    InitiativeState.last_delivery_at,
+                                    now,
+                                ),
+                                "updated_at": now,
+                            },
+                        )
+                    )
 
     async def mark_outbox_failed_attempt(self, outbox_id: int, error: str, retryable: bool) -> None:
         async with self._session_factory.begin() as session:

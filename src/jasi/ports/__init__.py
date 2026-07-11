@@ -8,6 +8,7 @@ from jasi.ports.repository import (
 )
 from jasi.ports.runtime import AgentRuntimePort
 from jasi.ports.schedule import ScheduleRepositoryPort
+from jasi.ports.source import InitiativeRepositoryPort, SourcePort, SourceRepositoryPort
 from jasi.ports.work import WorkRepositoryPort
 
 __all__ = [
@@ -15,11 +16,14 @@ __all__ = [
     "AgentRuntimePort",
     "ConversationRepositoryPort",
     "InboundHandler",
+    "InitiativeRepositoryPort",
     "ModelPort",
     "OutboundPolicy",
     "OutboxRepositoryPort",
     "PassiveIngressRepositoryPort",
     "RuntimeRepositoryPort",
     "ScheduleRepositoryPort",
+    "SourcePort",
+    "SourceRepositoryPort",
     "WorkRepositoryPort",
 ]

@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from jasi.adapters.persistence.postgres.db import (
     Conversation,
     InboundEvent,
+    InitiativeState,
     Message,
     OutboxMessage,
     WorkItem,
@@ -122,6 +123,25 @@ class SQLAlchemyWorkRepository:
                 max_attempts=5,
             )
             session.add(work)
+            await session.execute(
+                pg_insert(InitiativeState)
+                .values(
+                    session_id=work.session_id,
+                    conversation_id=conversation.id,
+                    last_user_at=message.received_at.astimezone(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+                .on_conflict_do_update(
+                    index_elements=[InitiativeState.session_id],
+                    set_={
+                        "last_user_at": func.greatest(
+                            InitiativeState.last_user_at,
+                            message.received_at.astimezone(UTC),
+                        ),
+                        "updated_at": datetime.now(UTC),
+                    },
+                )
+            )
             await session.flush()
             return WorkEnqueueResult(work=work_record(work), created=True)
 

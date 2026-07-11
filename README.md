@@ -25,6 +25,13 @@ Interval and cron misfires are coalesced to one occurrence after downtime. The c
 MVP exposes schedule creation through `ScheduleService`; it does not yet add a Telegram
 command or scheduling tool.
 
+Proactive delivery is split into source ingestion and initiative planning. A registered
+`SourcePort` is polled with a durable subscription cursor; source items are deduplicated
+before `InitiativePlanner` creates a low-priority `proactive` Work. Per-session cooldown
+is reserved in the same transaction as that Work. Source text is runtime input, not a
+user chat message. The repository currently ships the connector boundary and workers,
+but no concrete external feed connector is enabled by default.
+
 ## Boundaries and Recovery
 
 - `AgentRuntime` only depends on `RuntimeRepositoryPort` for history, Turns, and tool
@@ -39,6 +46,8 @@ command or scheduling tool.
   the sender registered for that channel.
 - `ScheduleWorker` only turns due PostgreSQL jobs into occurrence-linked Work. It never
   calls Runtime or a Channel.
+- `SourceWorker` persists cursor and source items; `InitiativePlanner` converts eligible
+  candidates to Work. Neither owns a model loop or sends directly.
 - PostgreSQL uses one repository implementation for these three narrow ports; callers
   only receive the capability they need.
 

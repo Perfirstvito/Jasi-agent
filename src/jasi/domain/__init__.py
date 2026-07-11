@@ -12,6 +12,13 @@ from jasi.domain.schedule import (
     ScheduleSpec,
     next_run_after,
 )
+from jasi.domain.source import (
+    SourceBatch,
+    SourceCreateResult,
+    SourceItemDraft,
+    SourceSubscriptionRecord,
+    SourceSubscriptionSpec,
+)
 from jasi.domain.work import (
     OutboundDraft,
     WorkCompletion,
@@ -33,6 +40,11 @@ __all__ = [
     "ScheduleCreateResult",
     "ScheduleJobRecord",
     "ScheduleSpec",
+    "SourceBatch",
+    "SourceCreateResult",
+    "SourceItemDraft",
+    "SourceSubscriptionRecord",
+    "SourceSubscriptionSpec",
     "WorkCompletion",
     "WorkEnqueueResult",
     "WorkExecutionResult",

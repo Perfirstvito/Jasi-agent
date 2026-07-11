@@ -15,18 +15,23 @@ from jasi.adapters.persistence.postgres.db import (
     create_engine,
     create_session_factory,
 )
+from jasi.adapters.persistence.postgres.initiative_repository import (
+    SQLAlchemyInitiativeRepository,
+)
 from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
 from jasi.adapters.persistence.postgres.schedule_repository import SQLAlchemyScheduleRepository
+from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourceRepository
 from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
 from jasi.application.agent_work import AgentWorkHandler
 from jasi.application.direct_work import DirectWorkHandler
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
 from jasi.application.passive_service import PassiveIngressService
 from jasi.application.schedule import ScheduleWorker
+from jasi.application.source import InitiativePlanner, SourceDispatcher, SourceWorker
 from jasi.application.work import WorkDispatcher, WorkFinalizer, WorkWorker
 from jasi.config import SettingsError, load_settings
 from jasi.logging import configure_logging
-from jasi.runtime.profile import PASSIVE_PROFILE, SCHEDULED_PROFILE
+from jasi.runtime.profile import PASSIVE_PROFILE, PROACTIVE_PROFILE, SCHEDULED_PROFILE
 from jasi.runtime.runtime import AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -49,6 +54,8 @@ async def run() -> None:
         repository = SQLAlchemyRepository(session_factory)
         work_repository = SQLAlchemyWorkRepository(session_factory)
         schedule_repository = SQLAlchemyScheduleRepository(session_factory)
+        source_repository = SQLAlchemySourceRepository(session_factory)
+        initiative_repository = SQLAlchemyInitiativeRepository(session_factory)
         channel = TelegramBotClient(
             bot_token=settings.telegram_bot_token,
             request_timeout_seconds=30,
@@ -73,6 +80,7 @@ async def run() -> None:
         runtime = AgentRuntime(
             profiles={
                 PASSIVE_PROFILE.name: PASSIVE_PROFILE,
+                PROACTIVE_PROFILE.name: PROACTIVE_PROFILE,
                 SCHEDULED_PROFILE.name: SCHEDULED_PROFILE,
             },
             model=model,
@@ -115,6 +123,22 @@ async def run() -> None:
             work_wakeup=work_wakeup,
             poll_seconds=settings.schedule_poll_seconds,
         )
+        source_wakeup = asyncio.Event()
+        initiative_wakeup = asyncio.Event()
+        source_worker = SourceWorker(
+            repository=source_repository,
+            dispatcher=SourceDispatcher({}),
+            batch_size=settings.source_batch_size,
+            source_wakeup=source_wakeup,
+            initiative_wakeup=initiative_wakeup,
+        )
+        proactive_planner = InitiativePlanner(
+            kind="proactive",
+            repository=initiative_repository,
+            batch_size=settings.initiative_batch_size,
+            initiative_wakeup=initiative_wakeup,
+            work_wakeup=work_wakeup,
+        )
         telegram = TelegramLongPollingAdapter(
             bot_token=settings.telegram_bot_token,
             allowed_user_ids=settings.telegram_allowed_user_ids,
@@ -125,6 +149,11 @@ async def run() -> None:
         stop_event = asyncio.Event()
         _install_signal_handlers(stop_event)
         worker_tasks = [
+            asyncio.create_task(source_worker.run(stop_event), name="jasi-source-worker"),
+            asyncio.create_task(
+                proactive_planner.run(stop_event),
+                name="jasi-proactive-planner",
+            ),
             asyncio.create_task(schedule_worker.run(stop_event), name="jasi-schedule-worker"),
             asyncio.create_task(work_worker.run(stop_event), name="jasi-work-worker"),
             asyncio.create_task(outbox_worker.run(stop_event), name="jasi-outbox-worker"),
@@ -133,6 +162,8 @@ async def run() -> None:
             await telegram.run(service, stop_event)
         finally:
             stop_event.set()
+            source_wakeup.set()
+            initiative_wakeup.set()
             schedule_wakeup.set()
             work_wakeup.set()
             outbox_wakeup.set()

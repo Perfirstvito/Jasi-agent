@@ -23,6 +23,8 @@ class Settings:
     work_batch_size: int = 8
     schedule_batch_size: int = 20
     schedule_poll_seconds: float = 1.0
+    source_batch_size: int = 10
+    initiative_batch_size: int = 10
     outbox_batch_size: int = 20
     log_level: str = "INFO"
 
@@ -84,6 +86,8 @@ def load_settings() -> Settings:
         work_batch_size=_int("JASI_WORK_BATCH_SIZE", 8),
         schedule_batch_size=_int("JASI_SCHEDULE_BATCH_SIZE", 20),
         schedule_poll_seconds=_float("JASI_SCHEDULE_POLL_SECONDS", 1.0),
+        source_batch_size=_int("JASI_SOURCE_BATCH_SIZE", 10),
+        initiative_batch_size=_int("JASI_INITIATIVE_BATCH_SIZE", 10),
         outbox_batch_size=_int("JASI_OUTBOX_BATCH_SIZE", 20),
         log_level=os.environ.get("JASI_LOG_LEVEL", "INFO").strip() or "INFO",
     )

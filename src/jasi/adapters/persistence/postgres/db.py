@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-EXPECTED_ALEMBIC_REVISION = "0005_schedules"
+EXPECTED_ALEMBIC_REVISION = "0006_proactive_sources"
 
 
 class DatabaseNotReady(RuntimeError):
@@ -214,6 +214,82 @@ class ScheduleOccurrence(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     work_item_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("now()")
+    )
+
+
+class SourceSubscription(Base):
+    __tablename__ = "source_subscriptions"
+    __mapper_args__ = {"eager_defaults": True}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sql_text("'{}'::jsonb")
+    )
+    cursor: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sql_text("'{}'::jsonb")
+    )
+    poll_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_ttl_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default="40")
+    next_poll_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sql_text("true"))
+    lease_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    poll_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("now()")
+    )
+
+
+class SourceItem(Base):
+    __tablename__ = "source_items"
+    __mapper_args__ = {"eager_defaults": True}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=sql_text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="new")
+    work_item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("now()")
+    )
+
+
+class InitiativeState(Base):
+    __tablename__ = "initiative_states"
+    __mapper_args__ = {"eager_defaults": True}
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_user_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_proactive_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_drift_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sql_text("now()")
     )
 

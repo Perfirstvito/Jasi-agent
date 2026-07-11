@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from jasi.domain.effect import EffectDraft
 from jasi.domain.models import utcnow
 
 InitiativeKind = Literal["proactive", "drift"]
@@ -101,3 +102,4 @@ class SourceItemDraft:
 class SourceBatch:
     items: tuple[SourceItemDraft, ...]
     next_cursor: dict[str, Any] = field(default_factory=dict)
+    effects: tuple[EffectDraft, ...] = ()

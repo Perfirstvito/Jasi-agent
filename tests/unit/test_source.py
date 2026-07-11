@@ -11,6 +11,7 @@ from jasi.application.source import (
     SourceService,
     SourceWorker,
 )
+from jasi.domain.effect import EffectDraft
 from jasi.domain.source import (
     SourceBatch,
     SourceCreateResult,
@@ -95,22 +96,32 @@ async def test_source_worker_polls_by_registry_and_wakes_planner() -> None:
                     ),
                 ),
                 next_cursor={"offset": 3},
+                effects=(
+                    EffectDraft(
+                        adapter="fake",
+                        operation="ack",
+                        dedupe_key="ack:item-3",
+                    ),
+                ),
             )
 
     repository = Repository()
     initiative_wakeup = asyncio.Event()
+    effect_wakeup = asyncio.Event()
     worker = SourceWorker(
         repository=repository,
         dispatcher=SourceDispatcher({"fake": Source()}),
         batch_size=10,
         source_wakeup=asyncio.Event(),
         initiative_wakeup=initiative_wakeup,
+        effect_wakeup=effect_wakeup,
     )
 
     assert await worker.drain_once() == 1
     assert repository.completed is not None
     assert repository.completed.next_cursor == {"offset": 3}
     assert initiative_wakeup.is_set()
+    assert effect_wakeup.is_set()
 
 
 @pytest.mark.asyncio
@@ -137,6 +148,7 @@ async def test_source_worker_records_safe_failure_for_unknown_source() -> None:
         batch_size=1,
         source_wakeup=asyncio.Event(),
         initiative_wakeup=asyncio.Event(),
+        effect_wakeup=asyncio.Event(),
     )
 
     assert await worker.drain_once() == 1

@@ -15,6 +15,7 @@ from jasi.adapters.persistence.postgres.db import (
     create_engine,
     create_session_factory,
 )
+from jasi.adapters.persistence.postgres.effect_repository import SQLAlchemyEffectRepository
 from jasi.adapters.persistence.postgres.initiative_repository import (
     SQLAlchemyInitiativeRepository,
 )
@@ -24,6 +25,7 @@ from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourc
 from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
 from jasi.application.agent_work import AgentWorkHandler
 from jasi.application.direct_work import DirectWorkHandler
+from jasi.application.effect import EffectDispatcher, EffectWorker
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
 from jasi.application.passive_service import PassiveIngressService
 from jasi.application.schedule import ScheduleWorker
@@ -61,6 +63,7 @@ async def run() -> None:
         schedule_repository = SQLAlchemyScheduleRepository(session_factory)
         source_repository = SQLAlchemySourceRepository(session_factory)
         initiative_repository = SQLAlchemyInitiativeRepository(session_factory)
+        effect_repository = SQLAlchemyEffectRepository(session_factory)
         channel = TelegramBotClient(
             bot_token=settings.telegram_bot_token,
             request_timeout_seconds=30,
@@ -135,12 +138,20 @@ async def run() -> None:
         source_wakeup = asyncio.Event()
         proactive_wakeup = asyncio.Event()
         drift_wakeup = asyncio.Event()
+        effect_wakeup = asyncio.Event()
+        effect_worker = EffectWorker(
+            repository=effect_repository,
+            dispatcher=EffectDispatcher(repository=effect_repository, adapters={}),
+            batch_size=settings.effect_batch_size,
+            wakeup=effect_wakeup,
+        )
         source_worker = SourceWorker(
             repository=source_repository,
             dispatcher=SourceDispatcher({}),
             batch_size=settings.source_batch_size,
             source_wakeup=source_wakeup,
             initiative_wakeup=proactive_wakeup,
+            effect_wakeup=effect_wakeup,
         )
         proactive_planner = InitiativePlanner(
             kind="proactive",
@@ -166,6 +177,7 @@ async def run() -> None:
         stop_event = asyncio.Event()
         _install_signal_handlers(stop_event)
         worker_tasks = [
+            asyncio.create_task(effect_worker.run(stop_event), name="jasi-effect-worker"),
             asyncio.create_task(source_worker.run(stop_event), name="jasi-source-worker"),
             asyncio.create_task(
                 proactive_planner.run(stop_event),
@@ -183,6 +195,7 @@ async def run() -> None:
             source_wakeup.set()
             proactive_wakeup.set()
             drift_wakeup.set()
+            effect_wakeup.set()
             schedule_wakeup.set()
             work_wakeup.set()
             outbox_wakeup.set()

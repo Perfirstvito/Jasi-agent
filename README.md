@@ -32,6 +32,11 @@ is reserved in the same transaction as that Work. Source text is runtime input, 
 user chat message. The repository currently ships the connector boundary and workers,
 but no concrete external feed connector is enabled by default.
 
+External source acknowledgements and similar non-message side effects use a separate
+Effect Outbox. A source poll commits its cursor, items, and effect records atomically;
+EffectWorker executes them later with deduplication and retry. Effect adapters are also
+explicitly registered and none are enabled by default.
+
 Drift uses the same InitiativePlanner and AgentWorkHandler with a different candidate
 source and Runtime Profile. `DriftOpportunityProducer` persists ideas from future
 source/Skill/Memory producers. The planner waits for the configured idle window and

@@ -29,6 +29,7 @@ class Settings:
     source_batch_size: int = 10
     initiative_batch_size: int = 10
     drift_batch_size: int = 5
+    effect_batch_size: int = 20
     outbox_batch_size: int = 20
     log_level: str = "INFO"
 
@@ -96,6 +97,7 @@ def load_settings() -> Settings:
         source_batch_size=_int("JASI_SOURCE_BATCH_SIZE", 10),
         initiative_batch_size=_int("JASI_INITIATIVE_BATCH_SIZE", 10),
         drift_batch_size=_int("JASI_DRIFT_BATCH_SIZE", 5),
+        effect_batch_size=_int("JASI_EFFECT_BATCH_SIZE", 20),
         outbox_batch_size=_int("JASI_OUTBOX_BATCH_SIZE", 20),
         log_level=os.environ.get("JASI_LOG_LEVEL", "INFO").strip() or "INFO",
     )

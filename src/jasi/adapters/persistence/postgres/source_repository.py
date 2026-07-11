@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from jasi.adapters.persistence.postgres.db import SourceItem, SourceSubscription
+from jasi.adapters.persistence.postgres.db import EffectOutbox, SourceItem, SourceSubscription
 from jasi.domain.source import (
     SourceBatch,
     SourceCreateResult,
@@ -155,6 +155,20 @@ class SQLAlchemySourceRepository:
                 )
                 if (await session.execute(statement)).scalar_one_or_none() is not None:
                     inserted += 1
+
+            for effect in batch.effects:
+                await session.execute(
+                    pg_insert(EffectOutbox)
+                    .values(
+                        adapter=effect.adapter,
+                        operation=effect.operation,
+                        dedupe_key=effect.dedupe_key,
+                        payload=effect.payload,
+                        status="pending",
+                        next_attempt_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=[EffectOutbox.dedupe_key])
+                )
 
             row.cursor = batch.next_cursor
             row.next_poll_at = now + timedelta(seconds=row.poll_interval_seconds)

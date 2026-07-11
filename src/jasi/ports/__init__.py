@@ -1,5 +1,6 @@
 from jasi.ports.channel import ChannelPort, InboundHandler, OutboundPolicy
 from jasi.ports.drift import DriftRepositoryPort
+from jasi.ports.effect import EffectPort, EffectRepositoryPort
 from jasi.ports.model import ModelPort
 from jasi.ports.passive import PassiveIngressRepositoryPort
 from jasi.ports.repository import (
@@ -17,6 +18,8 @@ __all__ = [
     "AgentRuntimePort",
     "ConversationRepositoryPort",
     "DriftRepositoryPort",
+    "EffectPort",
+    "EffectRepositoryPort",
     "InboundHandler",
     "InitiativeRepositoryPort",
     "ModelPort",

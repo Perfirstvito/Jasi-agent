@@ -123,8 +123,8 @@ async def test_schedule_materialization_is_unique_recoverable_and_uses_outbox() 
         assert await schedules.cancel_schedule(future.job.id) is False
 
         first, second = await asyncio.gather(
-            schedules.materialize_due(now, limit=20),
-            schedules.materialize_due(now, limit=20),
+            schedules.materialize_due(now, limit=1000),
+            schedules.materialize_due(now, limit=1000),
         )
         expected_job_ids = {
             one_time.job.id,
@@ -144,7 +144,7 @@ async def test_schedule_materialization_is_unique_recoverable_and_uses_outbox() 
         assert {row.payload["schedule_job_id"] for row in materialized} == expected_job_ids
         assert {row.action for row in materialized} == {"direct", "agent"}
         assert next(row for row in materialized if row.action == "agent").profile == "scheduled"
-        assert await schedules.materialize_due(now, limit=20) == []
+        assert await schedules.materialize_due(now, limit=1000) == []
 
         stored_once = await schedules.get_schedule(one_time.job.id)
         stored_interval = await schedules.get_schedule(interval.job.id)
@@ -170,7 +170,7 @@ async def test_schedule_materialization_is_unique_recoverable_and_uses_outbox() 
         next_interval_time = stored_interval.next_run_at
         next_occurrences = await schedules.materialize_due(
             next_interval_time,
-            limit=20,
+            limit=1000,
         )
         interval_occurrences = [
             row
@@ -238,6 +238,6 @@ async def test_schedule_materialization_is_unique_recoverable_and_uses_outbox() 
         assert invalid_count == 0
 
         restarted = SQLAlchemyScheduleRepository(session_factory)
-        assert await restarted.materialize_due(now, limit=20) == []
+        assert await restarted.materialize_due(now, limit=1000) == []
     finally:
         await engine.dispose()

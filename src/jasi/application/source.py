@@ -62,6 +62,7 @@ class SourceWorker:
         batch_size: int,
         source_wakeup: asyncio.Event,
         initiative_wakeup: asyncio.Event,
+        effect_wakeup: asyncio.Event,
         lease_seconds: float = 120,
         poll_timeout_seconds: float = 60,
         idle_sleep_seconds: float = 1,
@@ -77,6 +78,7 @@ class SourceWorker:
         self._batch_size = batch_size
         self._source_wakeup = source_wakeup
         self._initiative_wakeup = initiative_wakeup
+        self._effect_wakeup = effect_wakeup
         self._lease_seconds = lease_seconds
         self._poll_timeout_seconds = poll_timeout_seconds
         self._idle_sleep_seconds = idle_sleep_seconds
@@ -122,6 +124,8 @@ class SourceWorker:
             )
             if inserted:
                 self._initiative_wakeup.set()
+            if batch.effects:
+                self._effect_wakeup.set()
         except SourceLeaseLost:
             logger.warning("source lease lost subscription_id=%s", subscription.id)
         except Exception as exc:

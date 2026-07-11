@@ -5,6 +5,7 @@ from jasi.ports.repository import (
     OutboxRepositoryPort,
     RuntimeRepositoryPort,
 )
+from jasi.ports.work import WorkRepositoryPort
 
 __all__ = [
     "ChannelPort",
@@ -14,4 +15,5 @@ __all__ = [
     "OutboundPolicy",
     "OutboxRepositoryPort",
     "RuntimeRepositoryPort",
+    "WorkRepositoryPort",
 ]

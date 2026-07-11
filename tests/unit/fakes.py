@@ -15,6 +15,14 @@ from jasi.domain.models import (
     OutboundPart,
     OutboxRecord,
 )
+from jasi.domain.work import (
+    WorkCompletion,
+    WorkEnqueueResult,
+    WorkExecutionResult,
+    WorkLeaseLost,
+    WorkRecord,
+    WorkSpec,
+)
 from jasi.runtime.models import (
     ModelRequest,
     ModelResponse,
@@ -377,3 +385,204 @@ class FakeRepository:
             if event["id"] == event_id:
                 return event
         raise KeyError(f"inbound event not found: {event_id}")
+
+
+class FakeWorkRepository:
+    def __init__(self) -> None:
+        self._next_work_id = 1
+        self._next_lease_id = 1
+        self._next_message_id = 1
+        self._next_outbox_id = 1
+        self.work: dict[int, WorkRecord] = {}
+        self.completions: dict[int, WorkCompletion] = {}
+        self.complete_calls: list[
+            tuple[int, str, WorkExecutionResult, tuple[OutboundPart, ...]]
+        ] = []
+        self.fail_next_completion = False
+
+    async def enqueue_work(self, spec: WorkSpec) -> WorkEnqueueResult:
+        existing = next(
+            (row for row in self.work.values() if row.dedupe_key == spec.dedupe_key),
+            None,
+        )
+        if existing is not None:
+            return WorkEnqueueResult(work=existing, created=False)
+
+        now = datetime.now(UTC)
+        row = WorkRecord(
+            id=self._next_work_id,
+            kind=spec.kind,
+            action=spec.action,
+            dedupe_key=spec.dedupe_key,
+            session_id=spec.session_id,
+            conversation_id=spec.conversation_id,
+            inbound_event_id=spec.inbound_event_id,
+            profile=spec.profile,
+            input_text=spec.input_text,
+            payload=dict(spec.payload),
+            priority=spec.priority,
+            status="pending",
+            attempts=0,
+            max_attempts=spec.max_attempts,
+            available_at=spec.available_at,
+            created_at=now,
+            updated_at=now,
+        )
+        self._next_work_id += 1
+        self.work[row.id] = row
+        return WorkEnqueueResult(work=row, created=True)
+
+    async def get_work(self, work_id: int) -> WorkRecord | None:
+        return self.work.get(work_id)
+
+    async def claim_work_batch(
+        self,
+        limit: int,
+        lease_seconds: float,
+    ) -> list[WorkRecord]:
+        now = datetime.now(UTC)
+        for work_id, row in list(self.work.items()):
+            if row.status == "running" and row.lease_until is not None and row.lease_until <= now:
+                self.work[work_id] = replace(
+                    row,
+                    status="pending",
+                    lease_token=None,
+                    lease_until=None,
+                    available_at=now,
+                    updated_at=now,
+                )
+
+        running_sessions = {
+            row.session_id for row in self.work.values() if row.status == "running"
+        }
+        candidates = sorted(
+            (
+                row
+                for row in self.work.values()
+                if row.status == "pending" and row.available_at <= now
+            ),
+            key=lambda row: (-row.priority, row.available_at, row.created_at, row.id),
+        )
+        claimed: list[WorkRecord] = []
+        for row in candidates:
+            if len(claimed) >= limit:
+                break
+            if row.session_id in running_sessions:
+                continue
+            token = f"lease-{self._next_lease_id}"
+            self._next_lease_id += 1
+            claimed_row = replace(
+                row,
+                status="running",
+                attempts=row.attempts + 1,
+                lease_token=token,
+                lease_until=now + timedelta(seconds=lease_seconds),
+                started_at=row.started_at or now,
+                last_error=None,
+                updated_at=now,
+            )
+            self.work[row.id] = claimed_row
+            claimed.append(claimed_row)
+            running_sessions.add(row.session_id)
+        return claimed
+
+    async def complete_work(
+        self,
+        work_id: int,
+        lease_token: str,
+        result: WorkExecutionResult,
+        parts: tuple[OutboundPart, ...],
+    ) -> WorkCompletion:
+        row = self.work[work_id]
+        if row.status == "succeeded":
+            return self.completions[work_id]
+        self._verify_lease(row, lease_token)
+        if self.fail_next_completion:
+            self.fail_next_completion = False
+            raise RuntimeError("simulated work completion failure")
+
+        self.complete_calls.append((work_id, lease_token, result, parts))
+        message = None
+        outbox: list[OutboxRecord] = []
+        output_message_id = None
+        if result.outbound is not None:
+            if row.conversation_id is None or not parts:
+                raise ValueError("outbound work requires a conversation and parts")
+            output_message_id = self._next_message_id
+            self._next_message_id += 1
+            message = MessageRecord(
+                id=output_message_id,
+                conversation_id=row.conversation_id,
+                role="assistant",
+                origin=result.outbound.origin,
+                sequence=output_message_id,
+                content=result.outbound.text,
+                delivery_status="pending",
+                turn_id=result.turn_id,
+                metadata={
+                    **result.outbound.metadata,
+                    "work_id": row.id,
+                    "work_kind": row.kind,
+                },
+            )
+            for index, part in enumerate(parts):
+                outbox.append(
+                    OutboxRecord(
+                        id=self._next_outbox_id,
+                        conversation_id=row.conversation_id,
+                        message_id=message.id,
+                        channel=result.outbound.channel,
+                        external_chat_id=result.outbound.external_chat_id,
+                        segment_index=index,
+                        segment_count=len(parts),
+                        text=part.text,
+                        status="pending",
+                        attempts=0,
+                        next_attempt_at=datetime.now(UTC),
+                    )
+                )
+                self._next_outbox_id += 1
+
+        now = datetime.now(UTC)
+        self.work[work_id] = replace(
+            row,
+            status="succeeded",
+            lease_token=None,
+            lease_until=None,
+            output_message_id=output_message_id,
+            completed_at=now,
+            updated_at=now,
+        )
+        completion = WorkCompletion(message=message, outbox=tuple(outbox))
+        self.completions[work_id] = completion
+        return completion
+
+    async def mark_work_failed_attempt(
+        self,
+        work_id: int,
+        lease_token: str,
+        error: str,
+    ) -> None:
+        row = self.work[work_id]
+        self._verify_lease(row, lease_token)
+        now = datetime.now(UTC)
+        exhausted = row.attempts >= row.max_attempts
+        self.work[work_id] = replace(
+            row,
+            status="failed" if exhausted else "pending",
+            lease_token=None,
+            lease_until=None,
+            available_at=now if exhausted else now + timedelta(seconds=2),
+            completed_at=now if exhausted else None,
+            last_error=error[:500],
+            updated_at=now,
+        )
+
+    def make_ready(self, work_id: int) -> None:
+        row = self.work[work_id]
+        self.work[work_id] = replace(row, available_at=datetime.now(UTC))
+
+    @staticmethod
+    def _verify_lease(row: WorkRecord, lease_token: str) -> None:
+        if row.status != "running" or row.lease_token != lease_token:
+            raise WorkLeaseLost(f"work lease is no longer owned: {row.id}")

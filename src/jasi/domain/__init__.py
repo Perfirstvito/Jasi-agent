@@ -7,6 +7,15 @@ from jasi.domain.models import (
     OutboundMessage,
     OutboxRecord,
 )
+from jasi.domain.work import (
+    OutboundDraft,
+    WorkCompletion,
+    WorkEnqueueResult,
+    WorkExecutionResult,
+    WorkLeaseLost,
+    WorkRecord,
+    WorkSpec,
+)
 
 __all__ = [
     "ConversationRecord",
@@ -15,5 +24,12 @@ __all__ = [
     "InboundMessage",
     "MessageRecord",
     "OutboundMessage",
+    "OutboundDraft",
     "OutboxRecord",
+    "WorkCompletion",
+    "WorkEnqueueResult",
+    "WorkExecutionResult",
+    "WorkLeaseLost",
+    "WorkRecord",
+    "WorkSpec",
 ]

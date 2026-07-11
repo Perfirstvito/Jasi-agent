@@ -205,13 +205,17 @@ class SQLAlchemyWorkRepository:
         self,
         limit: int,
         lease_seconds: float,
+        background_limit: int | None = None,
     ) -> list[WorkRecord]:
         if limit <= 0:
             return []
         if lease_seconds <= 0:
             raise ValueError("work lease must be positive")
+        if background_limit is not None and background_limit < 0:
+            raise ValueError("background work limit cannot be negative")
 
         async with self._session_factory.begin() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(1_240_571_193)))
             now = datetime.now(UTC)
             await session.execute(
                 update(WorkItem)
@@ -228,46 +232,37 @@ class SQLAlchemyWorkRepository:
                 )
             )
 
-            rank = func.row_number().over(
-                partition_by=WorkItem.session_id,
-                order_by=(
-                    WorkItem.priority.desc(),
-                    WorkItem.available_at,
-                    WorkItem.created_at,
-                    WorkItem.id,
-                ),
+            foreground = await self._select_candidates(
+                session,
+                now=now,
+                limit=limit,
+                background=False,
+                excluded_sessions=set(),
             )
-            ranked = (
-                select(WorkItem.id.label("work_id"), rank.label("session_rank"))
-                .where(
-                    WorkItem.status == "pending",
-                    WorkItem.available_at <= now,
-                )
-                .subquery()
+            remaining = limit - len(foreground)
+            configured_background_limit = (
+                limit if background_limit is None else background_limit
             )
-            running = aliased(WorkItem)
-            statement = (
-                select(WorkItem)
-                .join(ranked, ranked.c.work_id == WorkItem.id)
-                .where(
-                    ranked.c.session_rank == 1,
-                    ~exists(
-                        select(running.id).where(
-                            running.session_id == WorkItem.session_id,
-                            running.status == "running",
-                        )
-                    ),
+            running_background = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(WorkItem)
+                    .where(
+                        WorkItem.status == "running",
+                        WorkItem.kind != "passive",
+                    )
                 )
-                .order_by(
-                    WorkItem.priority.desc(),
-                    WorkItem.available_at,
-                    WorkItem.created_at,
-                    WorkItem.id,
-                )
-                .limit(limit)
-                .with_for_update(skip_locked=True, of=WorkItem)
+                or 0
             )
-            rows = list((await session.scalars(statement)).all())
+            background_slots = max(0, configured_background_limit - running_background)
+            background = await self._select_candidates(
+                session,
+                now=now,
+                limit=min(remaining, background_slots),
+                background=True,
+                excluded_sessions={row.session_id for row in foreground},
+            )
+            rows = [*foreground, *background]
             lease_until = now + timedelta(seconds=lease_seconds)
             for row in rows:
                 row.status = "running"
@@ -279,6 +274,85 @@ class SQLAlchemyWorkRepository:
                 row.updated_at = now
             await session.flush()
             return [work_record(row) for row in rows]
+
+    async def renew_work_lease(
+        self,
+        work_id: int,
+        lease_token: str,
+        lease_seconds: float,
+    ) -> datetime:
+        if lease_seconds <= 0:
+            raise ValueError("work lease must be positive")
+        now = datetime.now(UTC)
+        lease_until = now + timedelta(seconds=lease_seconds)
+        async with self._session_factory.begin() as session:
+            renewed = await session.scalar(
+                update(WorkItem)
+                .where(
+                    WorkItem.id == work_id,
+                    WorkItem.status == "running",
+                    WorkItem.lease_token == lease_token,
+                    WorkItem.lease_until > now,
+                )
+                .values(lease_until=lease_until, updated_at=now)
+                .returning(WorkItem.lease_until)
+            )
+            if renewed is None:
+                raise WorkLeaseLost(f"work lease is no longer owned: {work_id}")
+            return renewed
+
+    async def _select_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime,
+        limit: int,
+        background: bool,
+        excluded_sessions: set[str],
+    ) -> list[WorkItem]:
+        if limit <= 0:
+            return []
+        order = (
+            WorkItem.priority.desc(),
+            WorkItem.available_at,
+            WorkItem.created_at,
+            WorkItem.id,
+        )
+        rank = func.row_number().over(
+            partition_by=WorkItem.session_id,
+            order_by=order,
+        )
+        kind_filter = WorkItem.kind != "passive" if background else WorkItem.kind == "passive"
+        ranked = (
+            select(WorkItem.id.label("work_id"), rank.label("session_rank"))
+            .where(
+                WorkItem.status == "pending",
+                WorkItem.available_at <= now,
+                kind_filter,
+            )
+            .subquery()
+        )
+        running = aliased(WorkItem)
+        filters = [
+            ranked.c.session_rank == 1,
+            ~exists(
+                select(running.id).where(
+                    running.session_id == WorkItem.session_id,
+                    running.status == "running",
+                )
+            ),
+        ]
+        if excluded_sessions:
+            filters.append(WorkItem.session_id.not_in(excluded_sessions))
+        statement = (
+            select(WorkItem)
+            .join(ranked, ranked.c.work_id == WorkItem.id)
+            .where(*filters)
+            .order_by(*order)
+            .limit(limit)
+            .with_for_update(skip_locked=True, of=WorkItem)
+        )
+        return list((await session.scalars(statement)).all())
 
     async def complete_work(
         self,

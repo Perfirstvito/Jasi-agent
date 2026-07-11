@@ -428,6 +428,36 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
             (),
         )
 
+        heartbeat = await work_repo.enqueue_work(
+            work_spec("heartbeat", session_id=f"heartbeat:{suffix}", priority=1000)
+        )
+        heartbeat_claim = (await work_repo.claim_work_batch(1, lease_seconds=0.05))[0]
+        original_lease_until = heartbeat_claim.lease_until
+        await asyncio.sleep(0.02)
+        renewed_until = await work_repo.renew_work_lease(
+            heartbeat_claim.id,
+            heartbeat_claim.lease_token or "",
+            lease_seconds=0.1,
+        )
+        await asyncio.sleep(0.04)
+        competing_claims = await work_repo.claim_work_batch(100, lease_seconds=60)
+        assert heartbeat.work.id not in {row.id for row in competing_claims}
+        assert original_lease_until is not None
+        assert renewed_until > original_lease_until
+        for row in competing_claims:
+            await work_repo.complete_work(
+                row.id,
+                row.lease_token or "",
+                WorkExecutionResult(),
+                (),
+            )
+        await work_repo.complete_work(
+            heartbeat_claim.id,
+            heartbeat_claim.lease_token or "",
+            WorkExecutionResult(),
+            (),
+        )
+
         retry = await work_repo.enqueue_work(
             work_spec(
                 "retry",

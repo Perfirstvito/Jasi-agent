@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from jasi.domain.models import OutboundPart
@@ -21,7 +22,15 @@ class WorkRepositoryPort(Protocol):
         self,
         limit: int,
         lease_seconds: float,
+        background_limit: int | None = None,
     ) -> list[WorkRecord]: ...
+
+    async def renew_work_lease(
+        self,
+        work_id: int,
+        lease_token: str,
+        lease_seconds: float,
+    ) -> datetime: ...
 
     async def complete_work(
         self,

@@ -218,3 +218,127 @@ async def test_finalizer_prepares_channel_parts_and_persists_outbox() -> None:
     assert completion.message.metadata["work_id"] == queued.work.id
     assert [row.text for row in completion.outbox] == ["abcd", "efgh"]
     assert wakeup.is_set()
+
+
+@pytest.mark.asyncio
+async def test_worker_renews_lease_while_handler_is_running() -> None:
+    class SlowHandler:
+        async def execute(self, _work: WorkRecord) -> WorkExecutionResult:
+            await asyncio.sleep(0.08)
+            return WorkExecutionResult()
+
+    repo = FakeWorkRepository()
+    queued = await repo.enqueue_work(
+        spec("heartbeat", kind="proactive", priority=40)
+    )
+    worker = WorkWorker(
+        repository=repo,
+        dispatcher=WorkDispatcher({"agent": SlowHandler()}),
+        finalizer=WorkFinalizer(
+            repository=repo,
+            outbound_policies={},
+            outbox_wakeup=asyncio.Event(),
+        ),
+        batch_size=1,
+        wakeup=asyncio.Event(),
+        lease_seconds=0.06,
+        heartbeat_seconds=0.015,
+    )
+
+    assert await worker.drain_once() == 1
+    assert repo.work[queued.work.id].status == "succeeded"
+    assert len(repo.renew_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_lease_loss_cancels_stale_handler_before_finalization() -> None:
+    cancelled = asyncio.Event()
+
+    class BlockingHandler:
+        async def execute(self, _work: WorkRecord) -> WorkExecutionResult:
+            try:
+                await asyncio.sleep(10)
+            finally:
+                cancelled.set()
+
+    repo = FakeWorkRepository()
+    queued = await repo.enqueue_work(spec("lost-lease"))
+    repo.fail_lease_renewal = True
+    worker = WorkWorker(
+        repository=repo,
+        dispatcher=WorkDispatcher({"agent": BlockingHandler()}),
+        finalizer=WorkFinalizer(
+            repository=repo,
+            outbound_policies={},
+            outbox_wakeup=asyncio.Event(),
+        ),
+        batch_size=1,
+        wakeup=asyncio.Event(),
+        lease_seconds=0.06,
+        heartbeat_seconds=0.01,
+    )
+
+    assert await worker.drain_once() == 1
+    assert cancelled.is_set()
+    assert repo.work[queued.work.id].status == "running"
+    assert queued.work.id not in repo.completions
+
+
+@pytest.mark.asyncio
+async def test_running_background_work_does_not_block_new_passive_claims() -> None:
+    background_started = asyncio.Event()
+    release_background = asyncio.Event()
+    passive_finished = asyncio.Event()
+
+    class LaneHandler:
+        def __init__(self) -> None:
+            self.background_count = 0
+
+        async def execute(self, work: WorkRecord) -> WorkExecutionResult:
+            if work.kind == "passive":
+                passive_finished.set()
+                return WorkExecutionResult()
+            self.background_count += 1
+            if self.background_count == 2:
+                background_started.set()
+            await release_background.wait()
+            return WorkExecutionResult()
+
+    repo = FakeWorkRepository()
+    await repo.enqueue_work(
+        spec("background-1", kind="proactive", session_id="telegram:1", priority=40)
+    )
+    await repo.enqueue_work(
+        spec("background-2", kind="drift", session_id="telegram:2", priority=20)
+    )
+    handler = LaneHandler()
+    wakeup = asyncio.Event()
+    stop_event = asyncio.Event()
+    worker = WorkWorker(
+        repository=repo,
+        dispatcher=WorkDispatcher({"agent": handler}),
+        finalizer=WorkFinalizer(
+            repository=repo,
+            outbound_policies={},
+            outbox_wakeup=asyncio.Event(),
+        ),
+        batch_size=3,
+        wakeup=wakeup,
+        background_limit=2,
+        idle_sleep_seconds=1,
+    )
+    task = asyncio.create_task(worker.run(stop_event))
+
+    try:
+        await asyncio.wait_for(background_started.wait(), timeout=1)
+        await repo.enqueue_work(
+            spec("passive", session_id="telegram:3", kind="passive", priority=100)
+        )
+        wakeup.set()
+
+        await asyncio.wait_for(passive_finished.wait(), timeout=0.5)
+    finally:
+        release_background.set()
+        stop_event.set()
+        wakeup.set()
+        await task

@@ -21,6 +21,9 @@ class Settings:
     telegram_poll_timeout_seconds: int = 30
     telegram_max_concurrency: int = 8
     work_batch_size: int = 8
+    work_background_concurrency: int = 2
+    work_lease_seconds: float = 600.0
+    work_heartbeat_seconds: float = 200.0
     schedule_batch_size: int = 20
     schedule_poll_seconds: float = 1.0
     source_batch_size: int = 10
@@ -85,6 +88,9 @@ def load_settings() -> Settings:
         telegram_poll_timeout_seconds=_int("JASI_TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
         telegram_max_concurrency=_int("JASI_TELEGRAM_MAX_CONCURRENCY", 8),
         work_batch_size=_int("JASI_WORK_BATCH_SIZE", 8),
+        work_background_concurrency=_int("JASI_WORK_BACKGROUND_CONCURRENCY", 2),
+        work_lease_seconds=_float("JASI_WORK_LEASE_SECONDS", 600.0),
+        work_heartbeat_seconds=_float("JASI_WORK_HEARTBEAT_SECONDS", 200.0),
         schedule_batch_size=_int("JASI_SCHEDULE_BATCH_SIZE", 20),
         schedule_poll_seconds=_float("JASI_SCHEDULE_POLL_SECONDS", 1.0),
         source_batch_size=_int("JASI_SOURCE_BATCH_SIZE", 10),

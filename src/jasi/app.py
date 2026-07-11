@@ -116,6 +116,9 @@ async def run() -> None:
             ),
             batch_size=settings.work_batch_size,
             wakeup=work_wakeup,
+            lease_seconds=settings.work_lease_seconds,
+            heartbeat_seconds=settings.work_heartbeat_seconds,
+            background_limit=settings.work_background_concurrency,
         )
         service = PassiveIngressService(
             repository=work_repository,

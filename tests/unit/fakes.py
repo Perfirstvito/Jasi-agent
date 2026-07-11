@@ -353,6 +353,8 @@ class FakeWorkRepository:
             tuple[int, str, WorkExecutionResult, tuple[OutboundPart, ...]]
         ] = []
         self.fail_next_completion = False
+        self.fail_lease_renewal = False
+        self.renew_calls: list[int] = []
 
     async def enqueue_work(self, spec: WorkSpec) -> WorkEnqueueResult:
         existing = next(
@@ -393,6 +395,7 @@ class FakeWorkRepository:
         self,
         limit: int,
         lease_seconds: float,
+        background_limit: int | None = None,
     ) -> list[WorkRecord]:
         now = datetime.now(UTC)
         for work_id, row in list(self.work.items()):
@@ -417,12 +420,25 @@ class FakeWorkRepository:
             ),
             key=lambda row: (-row.priority, row.available_at, row.created_at, row.id),
         )
+        foreground = [row for row in candidates if row.kind == "passive"]
+        background = [row for row in candidates if row.kind != "passive"]
+        configured_background_limit = limit if background_limit is None else background_limit
+        running_background = sum(
+            row.status == "running" and row.kind != "passive" for row in self.work.values()
+        )
+        background_slots = max(0, configured_background_limit - running_background)
         claimed: list[WorkRecord] = []
-        for row in candidates:
+        claimed_background = 0
+        ordered = [*foreground, *background]
+        for row in ordered:
             if len(claimed) >= limit:
                 break
             if row.session_id in running_sessions:
                 continue
+            if row.kind != "passive":
+                if claimed_background >= background_slots:
+                    continue
+                claimed_background += 1
             token = f"lease-{self._next_lease_id}"
             self._next_lease_id += 1
             claimed_row = replace(
@@ -439,6 +455,24 @@ class FakeWorkRepository:
             claimed.append(claimed_row)
             running_sessions.add(row.session_id)
         return claimed
+
+    async def renew_work_lease(
+        self,
+        work_id: int,
+        lease_token: str,
+        lease_seconds: float,
+    ) -> datetime:
+        self.renew_calls.append(work_id)
+        row = self.work[work_id]
+        now = datetime.now(UTC)
+        if self.fail_lease_renewal:
+            raise WorkLeaseLost(f"work lease is no longer owned: {work_id}")
+        self._verify_lease(row, lease_token)
+        if row.lease_until is None or row.lease_until <= now:
+            raise WorkLeaseLost(f"work lease is no longer owned: {work_id}")
+        lease_until = now + timedelta(seconds=lease_seconds)
+        self.work[work_id] = replace(row, lease_until=lease_until, updated_at=now)
+        return lease_until
 
     async def complete_work(
         self,

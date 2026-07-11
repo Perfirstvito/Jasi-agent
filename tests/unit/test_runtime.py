@@ -8,7 +8,7 @@ import pytest
 from jasi.ports.model import ModelPort
 from jasi.runtime.hooks import HookSpec
 from jasi.runtime.models import ModelResponse, ToolCall, TurnRequest
-from jasi.runtime.profile import PASSIVE_PROFILE
+from jasi.runtime.profile import PASSIVE_PROFILE, SCHEDULED_PROFILE
 from jasi.runtime.runtime import FIXED_ERROR_REPLY, AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -78,6 +78,36 @@ async def test_runtime_can_load_latest_history_for_internal_agent_work() -> None
         ("assistant", "delivered"),
         ("user", "internal context"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_selects_profile_without_changing_execution_flow() -> None:
+    repo = FakeRepository()
+    model = FakeModel([ModelResponse(content="scheduled reply")])
+    runtime = AgentRuntime(
+        profiles={
+            PASSIVE_PROFILE.name: PASSIVE_PROFILE,
+            SCHEDULED_PROFILE.name: SCHEDULED_PROFILE,
+        },
+        model=model,
+        repository=repo,
+        tools=ToolRegistry([get_current_time_tool]),
+        model_name="test-model",
+        model_timeout_seconds=5,
+        timezone="Asia/Shanghai",
+    )
+
+    result = await runtime.run(
+        replace(
+            make_request("prepare the reminder"),
+            work_id=3,
+            profile="scheduled",
+            history_before_sequence=None,
+        )
+    )
+
+    assert result.final_text == "scheduled reply"
+    assert "scheduled instruction" in (model.requests[0].messages[0].content or "")
 
 
 @pytest.mark.asyncio

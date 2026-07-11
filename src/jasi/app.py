@@ -16,14 +16,17 @@ from jasi.adapters.persistence.postgres.db import (
     create_session_factory,
 )
 from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
+from jasi.adapters.persistence.postgres.schedule_repository import SQLAlchemyScheduleRepository
 from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
 from jasi.application.agent_work import AgentWorkHandler
+from jasi.application.direct_work import DirectWorkHandler
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
 from jasi.application.passive_service import PassiveIngressService
+from jasi.application.schedule import ScheduleWorker
 from jasi.application.work import WorkDispatcher, WorkFinalizer, WorkWorker
 from jasi.config import SettingsError, load_settings
 from jasi.logging import configure_logging
-from jasi.runtime.profile import PASSIVE_PROFILE
+from jasi.runtime.profile import PASSIVE_PROFILE, SCHEDULED_PROFILE
 from jasi.runtime.runtime import AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -45,6 +48,7 @@ async def run() -> None:
         session_factory = create_session_factory(engine)
         repository = SQLAlchemyRepository(session_factory)
         work_repository = SQLAlchemyWorkRepository(session_factory)
+        schedule_repository = SQLAlchemyScheduleRepository(session_factory)
         channel = TelegramBotClient(
             bot_token=settings.telegram_bot_token,
             request_timeout_seconds=30,
@@ -67,7 +71,10 @@ async def run() -> None:
         )
         tools = ToolRegistry([get_current_time_tool])
         runtime = AgentRuntime(
-            profiles={PASSIVE_PROFILE.name: PASSIVE_PROFILE},
+            profiles={
+                PASSIVE_PROFILE.name: PASSIVE_PROFILE,
+                SCHEDULED_PROFILE.name: SCHEDULED_PROFILE,
+            },
             model=model,
             repository=repository,
             tools=tools,
@@ -81,7 +88,8 @@ async def run() -> None:
                 "agent": AgentWorkHandler(
                     runtime=runtime,
                     conversations=repository,
-                )
+                ),
+                "direct": DirectWorkHandler(repository),
             }
         )
         work_worker = WorkWorker(
@@ -99,6 +107,14 @@ async def run() -> None:
             repository=work_repository,
             work_wakeup=work_wakeup,
         )
+        schedule_wakeup = asyncio.Event()
+        schedule_worker = ScheduleWorker(
+            repository=schedule_repository,
+            batch_size=settings.schedule_batch_size,
+            schedule_wakeup=schedule_wakeup,
+            work_wakeup=work_wakeup,
+            poll_seconds=settings.schedule_poll_seconds,
+        )
         telegram = TelegramLongPollingAdapter(
             bot_token=settings.telegram_bot_token,
             allowed_user_ids=settings.telegram_allowed_user_ids,
@@ -109,6 +125,7 @@ async def run() -> None:
         stop_event = asyncio.Event()
         _install_signal_handlers(stop_event)
         worker_tasks = [
+            asyncio.create_task(schedule_worker.run(stop_event), name="jasi-schedule-worker"),
             asyncio.create_task(work_worker.run(stop_event), name="jasi-work-worker"),
             asyncio.create_task(outbox_worker.run(stop_event), name="jasi-outbox-worker"),
         ]
@@ -116,6 +133,7 @@ async def run() -> None:
             await telegram.run(service, stop_event)
         finally:
             stop_event.set()
+            schedule_wakeup.set()
             work_wakeup.set()
             outbox_wakeup.set()
             await asyncio.gather(*worker_tasks)

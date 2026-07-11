@@ -1,6 +1,6 @@
 # Jasi
 
-Jasi is a minimal Telegram passive-chat MVP:
+Jasi is a small durable agent runtime with Telegram passive chat and scheduled delivery:
 
 ```text
 Telegram private text
@@ -18,6 +18,13 @@ The first profile is intentionally narrow: private Telegram text only, no group 
 no attachments, one configured model, one runtime process, and one tool
 (`get_current_time`).
 
+Scheduled jobs are a separate timing domain. `at`, `interval`, and cron rules create a
+unique occurrence and a durable Work in one transaction. A `direct` job skips the model;
+an `agent` job uses the `scheduled` Runtime Profile. Both finish through the same Outbox.
+Interval and cron misfires are coalesced to one occurrence after downtime. The current
+MVP exposes schedule creation through `ScheduleService`; it does not yet add a Telegram
+command or scheduling tool.
+
 ## Boundaries and Recovery
 
 - `AgentRuntime` only depends on `RuntimeRepositoryPort` for history, Turns, and tool
@@ -30,6 +37,8 @@ no attachments, one configured model, one runtime process, and one tool
   the completed Work, assistant message, Outbox parts, and inbound state.
 - `OutboxWorker` depends on `OutboxRepositoryPort` and dispatches each record through
   the sender registered for that channel.
+- `ScheduleWorker` only turns due PostgreSQL jobs into occurrence-linked Work. It never
+  calls Runtime or a Channel.
 - PostgreSQL uses one repository implementation for these three narrow ports; callers
   only receive the capability they need.
 

@@ -6,6 +6,12 @@ from jasi.domain.models import (
     OutboundMessage,
     OutboxRecord,
 )
+from jasi.domain.schedule import (
+    ScheduleCreateResult,
+    ScheduleJobRecord,
+    ScheduleSpec,
+    next_run_after,
+)
 from jasi.domain.work import (
     OutboundDraft,
     WorkCompletion,
@@ -24,10 +30,14 @@ __all__ = [
     "OutboundMessage",
     "OutboundDraft",
     "OutboxRecord",
+    "ScheduleCreateResult",
+    "ScheduleJobRecord",
+    "ScheduleSpec",
     "WorkCompletion",
     "WorkEnqueueResult",
     "WorkExecutionResult",
     "WorkLeaseLost",
     "WorkRecord",
     "WorkSpec",
+    "next_run_after",
 ]

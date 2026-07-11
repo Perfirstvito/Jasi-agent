@@ -15,6 +15,7 @@ from jasi.adapters.persistence.postgres.db import (
     OutboxMessage,
     WorkItem,
 )
+from jasi.adapters.persistence.postgres.records import work_record
 from jasi.domain.models import InboundMessage, MessageRecord, OutboundPart, OutboxRecord
 from jasi.domain.work import (
     WorkCompletion,
@@ -70,7 +71,7 @@ class SQLAlchemyWorkRepository:
                     )
                 ).one_or_none()
                 if existing is not None:
-                    return WorkEnqueueResult(work=_work_record(existing), created=False)
+                    return WorkEnqueueResult(work=work_record(existing), created=False)
                 if event.status == "completed":
                     return None
                 if event.conversation_id is None or event.message_id is None:
@@ -122,7 +123,7 @@ class SQLAlchemyWorkRepository:
             )
             session.add(work)
             await session.flush()
-            return WorkEnqueueResult(work=_work_record(work), created=True)
+            return WorkEnqueueResult(work=work_record(work), created=True)
 
     async def enqueue_work(self, spec: WorkSpec) -> WorkEnqueueResult:
         _validate_spec(spec)
@@ -158,12 +159,12 @@ class SQLAlchemyWorkRepository:
             row = await session.get(WorkItem, work_id)
             if row is None:
                 raise RuntimeError("work disappeared after enqueue")
-            return WorkEnqueueResult(work=_work_record(row), created=created)
+            return WorkEnqueueResult(work=work_record(row), created=created)
 
     async def get_work(self, work_id: int) -> WorkRecord | None:
         async with self._session_factory() as session:
             row = await session.get(WorkItem, work_id)
-            return _work_record(row) if row is not None else None
+            return work_record(row) if row is not None else None
 
     async def claim_work_batch(
         self,
@@ -242,7 +243,7 @@ class SQLAlchemyWorkRepository:
                 row.last_error = None
                 row.updated_at = now
             await session.flush()
-            return [_work_record(row) for row in rows]
+            return [work_record(row) for row in rows]
 
     async def complete_work(
         self,
@@ -443,34 +444,6 @@ def _validate_spec(spec: WorkSpec) -> None:
 def _verify_lease(work: WorkItem, lease_token: str) -> None:
     if work.status != "running" or not lease_token or work.lease_token != lease_token:
         raise WorkLeaseLost(f"work lease is no longer owned: {work.id}")
-
-
-def _work_record(row: WorkItem) -> WorkRecord:
-    return WorkRecord(
-        id=row.id,
-        kind=row.kind,
-        action=row.action,
-        dedupe_key=row.dedupe_key,
-        session_id=row.session_id,
-        conversation_id=row.conversation_id,
-        inbound_event_id=row.inbound_event_id,
-        profile=row.profile,
-        input_text=row.input_text,
-        payload=dict(row.payload or {}),
-        priority=row.priority,
-        status=row.status,
-        attempts=row.attempts,
-        max_attempts=row.max_attempts,
-        available_at=row.available_at,
-        lease_token=row.lease_token,
-        lease_until=row.lease_until,
-        output_message_id=row.output_message_id,
-        last_error=row.last_error,
-        created_at=row.created_at,
-        started_at=row.started_at,
-        completed_at=row.completed_at,
-        updated_at=row.updated_at,
-    )
 
 
 def _message_record(row: Message) -> MessageRecord:

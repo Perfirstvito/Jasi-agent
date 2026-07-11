@@ -22,7 +22,7 @@ def make_runtime(
     model_timeout_seconds: float = 5,
 ) -> AgentRuntime:
     return AgentRuntime(
-        profile=profile,
+        profiles={profile.name: profile},
         model=model,
         repository=repo,
         tools=ToolRegistry([get_current_time_tool]),
@@ -34,11 +34,12 @@ def make_runtime(
 
 def make_request(text: str = "current") -> TurnRequest:
     return TurnRequest(
+        work_id=2,
         session_id="telegram:1",
-        inbound_message_id=2,
-        inbound_text=text,
+        conversation_id=1,
+        input_text=text,
         profile="passive",
-        metadata={"conversation_id": 1, "message_sequence": 2},
+        history_before_sequence=2,
     )
 
 
@@ -56,6 +57,27 @@ async def test_runtime_plain_text_turn_excludes_current_message_from_history() -
     user_messages = [m.content for m in model.requests[0].messages if m.role == "user"]
     assert user_messages == ["old", "current"]
     assert repo.turns[result.turn_id]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_can_load_latest_history_for_internal_agent_work() -> None:
+    repo = FakeRepository()
+    repo.add_message(role="user", content="latest user", sequence=3)
+    repo.add_message(role="assistant", content="delivered", sequence=4)
+    model = FakeModel([ModelResponse(content="hello")])
+    request = replace(
+        make_request("internal context"),
+        history_before_sequence=None,
+    )
+
+    await make_runtime(model, repo).run(request)
+
+    messages = [(item.role, item.content) for item in model.requests[0].messages]
+    assert messages[-3:] == [
+        ("user", "latest user"),
+        ("assistant", "delivered"),
+        ("user", "internal context"),
+    ]
 
 
 @pytest.mark.asyncio

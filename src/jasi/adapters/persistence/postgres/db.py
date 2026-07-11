@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-EXPECTED_ALEMBIC_REVISION = "0003_durable_work"
+EXPECTED_ALEMBIC_REVISION = "0004_passive_work"
 
 
 class DatabaseNotReady(RuntimeError):
@@ -94,7 +94,8 @@ class Turn(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     conversation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    inbound_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inbound_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    work_item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     profile: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)

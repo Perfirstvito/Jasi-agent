@@ -1,7 +1,6 @@
 from jasi.domain.models import (
     ConversationRecord,
     DeliveryResult,
-    InboundClaim,
     InboundMessage,
     MessageRecord,
     OutboundMessage,
@@ -20,7 +19,6 @@ from jasi.domain.work import (
 __all__ = [
     "ConversationRecord",
     "DeliveryResult",
-    "InboundClaim",
     "InboundMessage",
     "MessageRecord",
     "OutboundMessage",

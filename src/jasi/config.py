@@ -20,6 +20,7 @@ class Settings:
     model_timeout_seconds: float = 60.0
     telegram_poll_timeout_seconds: int = 30
     telegram_max_concurrency: int = 8
+    work_batch_size: int = 8
     outbox_batch_size: int = 20
     log_level: str = "INFO"
 
@@ -78,6 +79,7 @@ def load_settings() -> Settings:
         model_timeout_seconds=_float("JASI_MODEL_TIMEOUT_SECONDS", 60.0),
         telegram_poll_timeout_seconds=_int("JASI_TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
         telegram_max_concurrency=_int("JASI_TELEGRAM_MAX_CONCURRENCY", 8),
+        work_batch_size=_int("JASI_WORK_BATCH_SIZE", 8),
         outbox_batch_size=_int("JASI_OUTBOX_BATCH_SIZE", 20),
         log_level=os.environ.get("JASI_LOG_LEVEL", "INFO").strip() or "INFO",
     )

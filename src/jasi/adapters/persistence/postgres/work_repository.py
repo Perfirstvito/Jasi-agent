@@ -9,12 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from jasi.adapters.persistence.postgres.db import (
+    Conversation,
     InboundEvent,
     Message,
     OutboxMessage,
     WorkItem,
 )
-from jasi.domain.models import MessageRecord, OutboundPart, OutboxRecord
+from jasi.domain.models import InboundMessage, MessageRecord, OutboundPart, OutboxRecord
 from jasi.domain.work import (
     WorkCompletion,
     WorkEnqueueResult,
@@ -30,6 +31,98 @@ WORK_BACKOFF_SECONDS = [2, 10, 30, 120, 300]
 class SQLAlchemyWorkRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    async def enqueue_passive(self, message: InboundMessage) -> WorkEnqueueResult | None:
+        async with self._session_factory.begin() as session:
+            conversation_id = await self._upsert_conversation(session, message)
+            event_statement = (
+                pg_insert(InboundEvent)
+                .values(
+                    channel=message.channel,
+                    external_update_id=message.external_update_id,
+                    conversation_id=conversation_id,
+                    external_user_id=message.external_user_id,
+                    status="processing",
+                    attempts=1,
+                    payload=message.metadata,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[InboundEvent.channel, InboundEvent.external_update_id]
+                )
+                .returning(InboundEvent.id)
+            )
+            event_id = (await session.execute(event_statement)).scalar_one_or_none()
+
+            if event_id is None:
+                event = (
+                    await session.scalars(
+                        select(InboundEvent)
+                        .where(
+                            InboundEvent.channel == message.channel,
+                            InboundEvent.external_update_id == message.external_update_id,
+                        )
+                        .with_for_update()
+                    )
+                ).one()
+                existing = (
+                    await session.scalars(
+                        select(WorkItem).where(WorkItem.inbound_event_id == event.id)
+                    )
+                ).one_or_none()
+                if existing is not None:
+                    return WorkEnqueueResult(work=_work_record(existing), created=False)
+                if event.status == "completed":
+                    return None
+                if event.conversation_id is None or event.message_id is None:
+                    raise RuntimeError("incomplete inbound event cannot be resumed")
+                conversation = await session.get(Conversation, event.conversation_id)
+                inbound_row = await session.get(Message, event.message_id)
+                if conversation is None or inbound_row is None:
+                    raise RuntimeError("inbound event references missing records")
+                event_id = event.id
+                event.status = "processing"
+                event.last_error = None
+                event.completed_at = None
+                event.updated_at = datetime.now(UTC)
+            else:
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is None:
+                    raise RuntimeError("conversation disappeared during inbound registration")
+                sequence = await self._next_message_sequence(session, conversation_id)
+                inbound_row = Message(
+                    conversation_id=conversation_id,
+                    role="user",
+                    origin=message.channel,
+                    sequence=sequence,
+                    content=message.text,
+                    delivery_status="sent",
+                    meta=message.metadata,
+                )
+                session.add(inbound_row)
+                await session.flush()
+                await session.execute(
+                    update(InboundEvent)
+                    .where(InboundEvent.id == event_id)
+                    .values(message_id=inbound_row.id)
+                )
+
+            work = WorkItem(
+                kind="passive",
+                action="agent",
+                dedupe_key=f"inbound:{message.channel}:{message.external_update_id}",
+                session_id=f"{conversation.channel}:{conversation.external_chat_id}",
+                conversation_id=conversation.id,
+                inbound_event_id=event_id,
+                profile="passive",
+                input_text=inbound_row.content,
+                payload={"history_before_sequence": inbound_row.sequence},
+                priority=100,
+                status="pending",
+                max_attempts=5,
+            )
+            session.add(work)
+            await session.flush()
+            return WorkEnqueueResult(work=_work_record(work), created=True)
 
     async def enqueue_work(self, spec: WorkSpec) -> WorkEnqueueResult:
         _validate_spec(spec)
@@ -252,11 +345,48 @@ class SQLAlchemyWorkRepository:
             if work.attempts >= work.max_attempts:
                 work.status = "failed"
                 work.completed_at = now
+                if work.inbound_event_id is not None:
+                    await session.execute(
+                        update(InboundEvent)
+                        .where(InboundEvent.id == work.inbound_event_id)
+                        .values(
+                            status="failed",
+                            last_error=work.last_error,
+                            completed_at=now,
+                            updated_at=now,
+                        )
+                    )
                 return
 
             backoff_index = min(work.attempts - 1, len(WORK_BACKOFF_SECONDS) - 1)
             work.status = "pending"
             work.available_at = now + timedelta(seconds=WORK_BACKOFF_SECONDS[backoff_index])
+            if work.inbound_event_id is not None:
+                await session.execute(
+                    update(InboundEvent)
+                    .where(InboundEvent.id == work.inbound_event_id)
+                    .values(last_error=work.last_error, updated_at=now)
+                )
+
+    async def _upsert_conversation(
+        self,
+        session: AsyncSession,
+        message: InboundMessage,
+    ) -> int:
+        statement = (
+            pg_insert(Conversation)
+            .values(
+                channel=message.channel,
+                external_chat_id=message.external_chat_id,
+                meta={"last_external_user_id": message.external_user_id},
+            )
+            .on_conflict_do_update(
+                index_elements=[Conversation.channel, Conversation.external_chat_id],
+                set_={"updated_at": datetime.now(UTC)},
+            )
+            .returning(Conversation.id)
+        )
+        return int((await session.execute(statement)).scalar_one())
 
     async def _get_work_for_update(self, session: AsyncSession, work_id: int) -> WorkItem:
         row = (

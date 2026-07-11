@@ -1,28 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
-from sqlalchemy import and_, delete, func, or_, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from jasi.adapters.persistence.postgres.db import (
     Conversation,
-    InboundEvent,
     Message,
     OutboxMessage,
     ToolExecution,
     Turn,
 )
-from jasi.domain.models import (
-    ConversationRecord,
-    InboundClaim,
-    InboundMessage,
-    MessageRecord,
-    OutboundPart,
-    OutboxRecord,
-)
+from jasi.domain.models import ConversationRecord, MessageRecord, OutboxRecord
 from jasi.runtime.models import ToolExecutionRecord, TurnResult, TurnStart, Usage
 
 OUTBOX_BACKOFF_SECONDS = [2, 10, 30, 120, 300]
@@ -33,112 +24,34 @@ class SQLAlchemyRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def claim_inbound_message(self, message: InboundMessage) -> InboundClaim | None:
-        async with self._session_factory.begin() as session:
-            conversation_id = await self._upsert_conversation(
-                session,
-                channel=message.channel,
-                external_chat_id=message.external_chat_id,
-                metadata={"last_external_user_id": message.external_user_id},
-            )
+    async def get_conversation(self, conversation_id: int) -> ConversationRecord | None:
+        async with self._session_factory() as session:
+            row = await session.get(Conversation, conversation_id)
+            return _conversation_record(row) if row is not None else None
 
-            event_stmt = (
-                pg_insert(InboundEvent)
-                .values(
-                    channel=message.channel,
-                    external_update_id=message.external_update_id,
-                    conversation_id=conversation_id,
-                    external_user_id=message.external_user_id,
-                    status="processing",
-                    attempts=1,
-                    payload=message.metadata,
-                )
-                .on_conflict_do_nothing(
-                    index_elements=[InboundEvent.channel, InboundEvent.external_update_id]
-                )
-                .returning(InboundEvent.id)
-            )
-            event_id = (await session.execute(event_stmt)).scalar_one_or_none()
-            if event_id is None:
-                event = (
-                    await session.scalars(
-                        select(InboundEvent)
-                        .where(
-                            InboundEvent.channel == message.channel,
-                            InboundEvent.external_update_id == message.external_update_id,
-                        )
-                        .with_for_update()
-                    )
-                ).one()
-                if event.status == "completed":
-                    return None
-                if event.conversation_id is None or event.message_id is None:
-                    raise RuntimeError("incomplete inbound event cannot be resumed")
-                event.status = "processing"
-                event.attempts += 1
-                event.last_error = None
-                event.updated_at = datetime.now(UTC)
-                conversation = await session.get(Conversation, event.conversation_id)
-                row = await session.get(Message, event.message_id)
-                if conversation is None or row is None:
-                    raise RuntimeError("inbound event references missing records")
-                return InboundClaim(
-                    event_id=event.id,
-                    conversation=_conversation_record(conversation),
-                    message=_message_record(row),
-                )
-
-            sequence = await self._next_message_sequence(session, conversation_id)
-            row = Message(
-                conversation_id=conversation_id,
-                role="user",
-                origin=message.channel,
-                sequence=sequence,
-                content=message.text,
-                delivery_status="sent",
-                meta=message.metadata,
-            )
-            session.add(row)
-            await session.flush()
-            await session.execute(
-                update(InboundEvent).where(InboundEvent.id == event_id).values(message_id=row.id)
-            )
-            conversation = await session.get(Conversation, conversation_id)
-            if conversation is None:
-                raise RuntimeError("conversation disappeared during inbound registration")
-            return InboundClaim(
-                event_id=event_id,
-                conversation=_conversation_record(conversation),
-                message=_message_record(row),
-            )
-
-    async def release_inbound(self, event_id: int, error: str) -> None:
-        async with self._session_factory.begin() as session:
-            event = await self._get_inbound_for_update(session, event_id)
-            if event.status == "completed":
-                return
-            event.status = "pending"
-            event.last_error = _safe_error(error)
-            event.updated_at = datetime.now(UTC)
-
-    async def load_history_before(
-        self, conversation_id: int, before_sequence: int, limit: int
+    async def load_history(
+        self,
+        conversation_id: int,
+        before_sequence: int | None,
+        limit: int,
     ) -> list[MessageRecord]:
         async with self._session_factory() as session:
+            filters = [
+                Message.conversation_id == conversation_id,
+                (
+                    (Message.role == "user")
+                    | (
+                        (Message.role == "assistant")
+                        & (Message.delivery_status == "sent")
+                        & (Message.origin != "system_error")
+                    )
+                ),
+            ]
+            if before_sequence is not None:
+                filters.append(Message.sequence < before_sequence)
             stmt = (
                 select(Message)
-                .where(
-                    Message.conversation_id == conversation_id,
-                    Message.sequence < before_sequence,
-                    (
-                        (Message.role == "user")
-                        | (
-                            (Message.role == "assistant")
-                            & (Message.delivery_status == "sent")
-                            & (Message.origin == "model")
-                        )
-                    ),
-                )
+                .where(*filters)
                 .order_by(Message.sequence.desc())
                 .limit(limit)
             )
@@ -147,8 +60,8 @@ class SQLAlchemyRepository:
 
     async def start_turn(
         self,
+        work_id: int,
         conversation_id: int,
-        inbound_message_id: int,
         profile: str,
         model: str,
         metadata: dict,
@@ -157,7 +70,7 @@ class SQLAlchemyRepository:
             row = (
                 await session.scalars(
                     select(Turn)
-                    .where(Turn.inbound_message_id == inbound_message_id)
+                    .where(Turn.work_item_id == work_id)
                     .with_for_update()
                 )
             ).one_or_none()
@@ -195,7 +108,7 @@ class SQLAlchemyRepository:
 
             row = Turn(
                 conversation_id=conversation_id,
-                inbound_message_id=inbound_message_id,
+                work_item_id=work_id,
                 profile=profile,
                 model=model,
                 status="running",
@@ -245,66 +158,6 @@ class SQLAlchemyRepository:
                 )
             )
 
-    async def complete_inbound_response(
-        self,
-        inbound_event_id: int,
-        conversation_id: int,
-        channel: str,
-        external_chat_id: str,
-        turn_id: int,
-        text: str,
-        parts: tuple[OutboundPart, ...],
-        origin: str,
-        metadata: dict,
-    ) -> tuple[MessageRecord, list[OutboxRecord]]:
-        if not parts:
-            raise ValueError("assistant response requires at least one outbound part")
-        async with self._session_factory.begin() as session:
-            event = await self._get_inbound_for_update(session, inbound_event_id)
-            if event.status == "completed":
-                return await self._load_response(session, turn_id)
-            if event.conversation_id != conversation_id:
-                raise ValueError("inbound event and response conversation do not match")
-
-            sequence = await self._next_message_sequence(session, conversation_id)
-            message = Message(
-                conversation_id=conversation_id,
-                role="assistant",
-                origin=origin,
-                sequence=sequence,
-                content=text,
-                delivery_status="pending",
-                turn_id=turn_id,
-                meta=metadata,
-            )
-            session.add(message)
-            await session.flush()
-
-            outbox_rows: list[OutboxMessage] = []
-            now = datetime.now(UTC)
-            for index, part in enumerate(parts):
-                outbox = OutboxMessage(
-                    conversation_id=conversation_id,
-                    message_id=message.id,
-                    channel=channel,
-                    external_chat_id=external_chat_id,
-                    segment_index=index,
-                    segment_count=len(parts),
-                    text=part.text,
-                    status="pending",
-                    attempts=0,
-                    next_attempt_at=now,
-                )
-                session.add(outbox)
-                outbox_rows.append(outbox)
-            await session.flush()
-            now = datetime.now(UTC)
-            event.status = "completed"
-            event.last_error = None
-            event.updated_at = now
-            event.completed_at = now
-            return _message_record(message), [_outbox_record(row) for row in outbox_rows]
-
     async def get_outbox(self, outbox_id: int) -> OutboxRecord | None:
         async with self._session_factory() as session:
             row = await session.get(OutboxMessage, outbox_id)
@@ -314,6 +167,7 @@ class SQLAlchemyRepository:
         async with self._session_factory.begin() as session:
             now = datetime.now(UTC)
             stale_lock_before = now - timedelta(minutes=5)
+            prior = aliased(OutboxMessage)
             stmt = (
                 select(OutboxMessage)
                 .where(
@@ -326,7 +180,14 @@ class SQLAlchemyRepository:
                             OutboxMessage.status == "delivering",
                             OutboxMessage.locked_at <= stale_lock_before,
                         ),
-                    )
+                    ),
+                    ~exists(
+                        select(prior.id).where(
+                            prior.message_id == OutboxMessage.message_id,
+                            prior.segment_index < OutboxMessage.segment_index,
+                            prior.status != "sent",
+                        )
+                    ),
                 )
                 .order_by(OutboxMessage.created_at, OutboxMessage.id)
                 .limit(limit)
@@ -377,6 +238,20 @@ class SQLAlchemyRepository:
                 row.status = "failed"
                 row.next_attempt_at = now
                 await session.execute(
+                    update(OutboxMessage)
+                    .where(
+                        OutboxMessage.message_id == row.message_id,
+                        OutboxMessage.segment_index > row.segment_index,
+                        OutboxMessage.status.in_(("pending", "delivering")),
+                    )
+                    .values(
+                        status="failed",
+                        locked_at=None,
+                        last_error="previous segment failed",
+                        updated_at=now,
+                    )
+                )
+                await session.execute(
                     update(Message)
                     .where(Message.id == row.message_id)
                     .values(delivery_status="failed")
@@ -388,30 +263,6 @@ class SQLAlchemyRepository:
             row.status = "pending"
             row.next_attempt_at = now + timedelta(seconds=backoff)
 
-    async def _upsert_conversation(
-        self, session: AsyncSession, channel: str, external_chat_id: str, metadata: dict[str, Any]
-    ) -> int:
-        stmt = (
-            pg_insert(Conversation)
-            .values(
-                channel=channel,
-                external_chat_id=external_chat_id,
-                meta=metadata,
-            )
-            .on_conflict_do_update(
-                index_elements=[Conversation.channel, Conversation.external_chat_id],
-                set_={"updated_at": datetime.now(UTC)},
-            )
-            .returning(Conversation.id)
-        )
-        return int((await session.execute(stmt)).scalar_one())
-
-    async def _next_message_sequence(self, session: AsyncSession, conversation_id: int) -> int:
-        current = await session.scalar(
-            select(func.max(Message.sequence)).where(Message.conversation_id == conversation_id)
-        )
-        return int(current or 0) + 1
-
     async def _get_outbox_for_update(self, session: AsyncSession, outbox_id: int) -> OutboxMessage:
         row = (
             await session.scalars(
@@ -421,41 +272,6 @@ class SQLAlchemyRepository:
         if row is None:
             raise KeyError(f"outbox message not found: {outbox_id}")
         return row
-
-    async def _get_inbound_for_update(self, session: AsyncSession, event_id: int) -> InboundEvent:
-        row = (
-            await session.scalars(
-                select(InboundEvent).where(InboundEvent.id == event_id).with_for_update()
-            )
-        ).one_or_none()
-        if row is None:
-            raise KeyError(f"inbound event not found: {event_id}")
-        return row
-
-    async def _load_response(
-        self, session: AsyncSession, turn_id: int
-    ) -> tuple[MessageRecord, list[OutboxRecord]]:
-        message = (
-            await session.scalars(
-                select(Message).where(
-                    Message.turn_id == turn_id,
-                    Message.role == "assistant",
-                )
-            )
-        ).one_or_none()
-        if message is None:
-            raise RuntimeError("completed inbound event has no assistant response")
-        outbox_rows = list(
-            (
-                await session.scalars(
-                    select(OutboxMessage)
-                    .where(OutboxMessage.message_id == message.id)
-                    .order_by(OutboxMessage.segment_index)
-                )
-            ).all()
-        )
-        return _message_record(message), [_outbox_record(row) for row in outbox_rows]
-
 
 def _conversation_record(row: Conversation) -> ConversationRecord:
     return ConversationRecord(

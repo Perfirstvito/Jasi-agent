@@ -16,18 +16,123 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
-async def test_repository_crud_idempotency_and_outbox_claim() -> None:
+async def test_concurrent_passive_ingress_serializes_messages_and_deduplicates() -> None:
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy import func, select
+
+    from jasi.adapters.persistence.postgres.db import (
+        InboundEvent,
+        Message,
+        WorkItem,
+        create_engine,
+        create_session_factory,
+    )
+    from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
+    from jasi.domain.models import InboundMessage
+    from jasi.domain.work import WorkExecutionResult
+
+    database_url = os.environ["JASI_TEST_DATABASE_URL"]
+    os.environ["JASI_DATABASE_URL"] = database_url
+    await asyncio.to_thread(command.upgrade, Config("alembic.ini"), "head")
+
+    engine = create_engine(database_url)
+    session_factory = create_session_factory(engine)
+    repo = SQLAlchemyWorkRepository(session_factory)
+    try:
+        suffix = uuid.uuid4().hex
+        chat_id = f"concurrent-chat-{suffix}"
+
+        def inbound(update_id: str) -> InboundMessage:
+            return InboundMessage(
+                channel="telegram",
+                external_update_id=f"{suffix}:{update_id}",
+                external_chat_id=chat_id,
+                external_user_id="42",
+                text=f"message-{update_id}",
+            )
+
+        initial = await asyncio.gather(
+            *(repo.enqueue_passive(inbound(str(index))) for index in range(10))
+        )
+        raced = await asyncio.gather(
+            repo.enqueue_passive(inbound("same")),
+            repo.enqueue_passive(inbound("same")),
+        )
+
+        assert all(result is not None and result.created for result in initial)
+        assert sorted(result.created for result in raced if result is not None) == [False, True]
+        conversation_ids = {
+            result.work.conversation_id for result in [*initial, *raced] if result is not None
+        }
+        assert len(conversation_ids) == 1
+        conversation_id = conversation_ids.pop()
+        assert conversation_id is not None
+
+        async with session_factory() as session:
+            sequences = list(
+                await session.scalars(
+                    select(Message.sequence)
+                    .where(Message.conversation_id == conversation_id)
+                    .order_by(Message.sequence)
+                )
+            )
+            event_count = await session.scalar(
+                select(func.count())
+                .select_from(InboundEvent)
+                .where(InboundEvent.conversation_id == conversation_id)
+            )
+            work_count = await session.scalar(
+                select(func.count())
+                .select_from(WorkItem)
+                .where(WorkItem.conversation_id == conversation_id)
+            )
+        assert sequences == list(range(1, 12))
+        assert event_count == 11
+        assert work_count == 11
+
+        claimed = await repo.claim_work_batch(20, lease_seconds=60)
+        session_claims = [row for row in claimed if row.conversation_id == conversation_id]
+        assert len(session_claims) == 1
+        for row in claimed:
+            await repo.complete_work(
+                row.id,
+                row.lease_token or "",
+                WorkExecutionResult(),
+                (),
+            )
+        while True:
+            claimed = await repo.claim_work_batch(20, lease_seconds=60)
+            if not claimed:
+                break
+            for row in claimed:
+                await repo.complete_work(
+                    row.id,
+                    row.lease_token or "",
+                    WorkExecutionResult(),
+                    (),
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_passive_ingress_turn_recovery_and_ordered_outbox() -> None:
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import func, select
     from sqlalchemy.exc import StatementError
 
     from jasi.adapters.persistence.postgres.db import (
+        InboundEvent,
         check_database_ready,
         create_engine,
         create_session_factory,
     )
     from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
+    from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
     from jasi.domain.models import InboundMessage, OutboundPart
+    from jasi.domain.work import OutboundDraft, WorkExecutionResult
     from jasi.runtime.models import ToolExecutionRecord, Usage
 
     database_url = os.environ["JASI_TEST_DATABASE_URL"]
@@ -39,7 +144,9 @@ async def test_repository_crud_idempotency_and_outbox_claim() -> None:
     engine = create_engine(database_url)
     try:
         await check_database_ready(engine)
-        repo = SQLAlchemyRepository(create_session_factory(engine))
+        session_factory = create_session_factory(engine)
+        repo = SQLAlchemyRepository(session_factory)
+        work_repo = SQLAlchemyWorkRepository(session_factory)
 
         suffix = uuid.uuid4().hex
         inbound = InboundMessage(
@@ -49,18 +156,39 @@ async def test_repository_crud_idempotency_and_outbox_claim() -> None:
             external_user_id="42",
             text="hello",
         )
-        claim = await repo.claim_inbound_message(inbound)
-        resumed = await repo.claim_inbound_message(inbound)
+        queued = await work_repo.enqueue_passive(inbound)
+        duplicate = await work_repo.enqueue_passive(inbound)
 
-        assert claim is not None
-        assert resumed is not None
-        assert resumed.event_id == claim.event_id
-        assert resumed.message.id == claim.message.id
-        assert claim.message.origin == inbound.channel
+        assert queued is not None
+        assert duplicate is not None
+        assert queued.created is True
+        assert duplicate.created is False
+        assert duplicate.work.id == queued.work.id
+        assert queued.work.inbound_event_id is not None
+        assert queued.work.payload["history_before_sequence"] == 1
+        history = await repo.load_history(
+            queued.work.conversation_id or 0,
+            before_sequence=None,
+            limit=30,
+        )
+        assert [(row.role, row.origin, row.content) for row in history] == [
+            ("user", inbound.channel, inbound.text)
+        ]
+
+        work_claims = await work_repo.claim_work_batch(100, lease_seconds=60)
+        claim = next(row for row in work_claims if row.id == queued.work.id)
+        for unrelated in work_claims:
+            if unrelated.id != claim.id:
+                await work_repo.complete_work(
+                    unrelated.id,
+                    unrelated.lease_token or "",
+                    WorkExecutionResult(),
+                    (),
+                )
 
         turn_start = await repo.start_turn(
-            conversation_id=claim.conversation.id,
-            inbound_message_id=claim.message.id,
+            work_id=claim.id,
+            conversation_id=claim.conversation_id or 0,
             profile="passive",
             model="test-model",
             metadata={},
@@ -85,8 +213,8 @@ async def test_repository_crud_idempotency_and_outbox_claim() -> None:
             Usage(total_tokens=3),
         )
         cached_turn = await repo.start_turn(
-            conversation_id=claim.conversation.id,
-            inbound_message_id=claim.message.id,
+            work_id=claim.id,
+            conversation_id=claim.conversation_id or 0,
             profile="passive",
             model="test-model",
             metadata={},
@@ -96,37 +224,67 @@ async def test_repository_crud_idempotency_and_outbox_claim() -> None:
         assert cached_turn.cached_result.final_text == "reply"
         assert len(cached_turn.cached_result.tool_records) == 1
 
-        _, outbox = await repo.complete_inbound_response(
-            inbound_event_id=claim.event_id,
-            conversation_id=claim.conversation.id,
-            channel=inbound.channel,
-            external_chat_id=inbound.external_chat_id,
-            turn_id=turn_id,
-            text="reply",
-            parts=(OutboundPart(text="reply"),),
-            origin="model",
-            metadata={},
+        completion = await work_repo.complete_work(
+            claim.id,
+            claim.lease_token or "",
+            WorkExecutionResult(
+                turn_id=turn_id,
+                outbound=OutboundDraft(
+                    channel=inbound.channel,
+                    external_chat_id=inbound.external_chat_id,
+                    text="reply-one reply-two",
+                    origin="model",
+                ),
+            ),
+            (OutboundPart(text="reply-one"), OutboundPart(text="reply-two")),
         )
-        duplicate = await repo.claim_inbound_message(inbound)
+        after_completion = await work_repo.enqueue_passive(inbound)
 
-        assert duplicate is None
+        assert after_completion is not None
+        assert after_completion.created is False
+        assert after_completion.work.status == "succeeded"
+        assert len(completion.outbox) == 2
+        before_delivery = await repo.load_history(
+            claim.conversation_id or 0,
+            before_sequence=None,
+            limit=30,
+        )
+        assert [row.role for row in before_delivery] == ["user"]
 
         first_claim, second_claim = await asyncio.gather(
             repo.claim_outbox_batch(10),
             repo.claim_outbox_batch(10),
         )
         claimed_once = first_claim + second_claim
-        claimed_twice = await repo.claim_outbox_batch(10)
-
-        claimed_ids = [row.id for row in claimed_once]
-        assert claimed_ids.count(outbox[0].id) == 1
-        assert outbox[0].id not in {row.id for row in claimed_twice}
+        target_ids = {row.id for row in completion.outbox}
+        first_target = [row for row in claimed_once if row.id in target_ids]
+        assert [row.segment_index for row in first_target] == [0]
 
         for row in claimed_once:
             await repo.mark_outbox_sent(row.id, "test-message-id")
-        sent = await repo.get_outbox(outbox[0].id)
+        after_first_segment = await repo.load_history(
+            claim.conversation_id or 0,
+            before_sequence=None,
+            limit=30,
+        )
+        assert [row.role for row in after_first_segment] == ["user"]
+        next_claim = await repo.claim_outbox_batch(10)
+        second_target = [row for row in next_claim if row.id in target_ids]
+        assert [row.segment_index for row in second_target] == [1]
+        for row in next_claim:
+            await repo.mark_outbox_sent(row.id, "test-message-id")
+        sent = await repo.get_outbox(completion.outbox[1].id)
         assert sent is not None
         assert sent.status == "sent"
+        after_delivery = await repo.load_history(
+            claim.conversation_id or 0,
+            before_sequence=None,
+            limit=30,
+        )
+        assert [(row.role, row.content) for row in after_delivery] == [
+            ("user", "hello"),
+            ("assistant", "reply-one reply-two"),
+        ]
 
         rollback_inbound = InboundMessage(
             channel="telegram",
@@ -134,25 +292,20 @@ async def test_repository_crud_idempotency_and_outbox_claim() -> None:
             external_chat_id=f"rollback-chat-{suffix}",
             external_user_id="42",
             text="rollback",
+            metadata={"not_json": object()},
         )
-        rollback_claim = await repo.claim_inbound_message(rollback_inbound)
-        assert rollback_claim is not None
         with pytest.raises(StatementError):
-            await repo.complete_inbound_response(
-                inbound_event_id=rollback_claim.event_id,
-                conversation_id=rollback_claim.conversation.id,
-                channel=rollback_inbound.channel,
-                external_chat_id=rollback_inbound.external_chat_id,
-                turn_id=turn_id,
-                text="must roll back",
-                parts=(OutboundPart(text="must roll back"),),
-                origin="model",
-                metadata={"not_json": object()},
+            await work_repo.enqueue_passive(rollback_inbound)
+        async with session_factory() as session:
+            rolled_back_events = await session.scalar(
+                select(func.count())
+                .select_from(InboundEvent)
+                .where(
+                    InboundEvent.channel == rollback_inbound.channel,
+                    InboundEvent.external_update_id == rollback_inbound.external_update_id,
+                )
             )
-
-        reclaimed = await repo.claim_inbound_message(rollback_inbound)
-        assert reclaimed is not None
-        assert reclaimed.message.id == rollback_claim.message.id
+        assert rolled_back_events == 0
     finally:
         await engine.dispose()
 
@@ -165,6 +318,7 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
     from sqlalchemy.exc import StatementError
 
     from jasi.adapters.persistence.postgres.db import (
+        Conversation,
         Message,
         OutboxMessage,
         WorkItem,
@@ -173,7 +327,7 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
     )
     from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
     from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
-    from jasi.domain.models import InboundMessage, OutboundPart
+    from jasi.domain.models import OutboundPart
     from jasi.domain.work import (
         OutboundDraft,
         WorkExecutionResult,
@@ -305,23 +459,21 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
         assert exhausted.status == "failed"
         assert exhausted.attempts == 2
 
-        chat_repo = SQLAlchemyRepository(session_factory)
-        inbound = await chat_repo.claim_inbound_message(
-            InboundMessage(
+        repo = SQLAlchemyRepository(session_factory)
+        async with session_factory.begin() as session:
+            conversation = Conversation(
                 channel="telegram",
-                external_update_id=f"atomic-{suffix}",
                 external_chat_id=f"atomic-chat-{suffix}",
-                external_user_id="42",
-                text="request",
             )
-        )
-        assert inbound is not None
+            session.add(conversation)
+            await session.flush()
+            conversation_id = conversation.id
         outbound_work = await work_repo.enqueue_work(
             work_spec(
                 "outbound",
                 session_id=f"outbound:{suffix}",
                 priority=1000,
-                conversation_id=inbound.conversation.id,
+                conversation_id=conversation_id,
             )
         )
         outbound_claim = (await work_repo.claim_work_batch(1, lease_seconds=60))[0]
@@ -329,7 +481,7 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
             turn_id=None,
             outbound=OutboundDraft(
                 channel="telegram",
-                external_chat_id=inbound.conversation.external_chat_id,
+                external_chat_id=f"atomic-chat-{suffix}",
                 text="reply",
                 origin="model",
                 metadata={"not_json": object()},
@@ -352,14 +504,14 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
                 select(func.count())
                 .select_from(Message)
                 .where(
-                    Message.conversation_id == inbound.conversation.id,
+                    Message.conversation_id == conversation_id,
                     Message.role == "assistant",
                 )
             )
             outbox_count = await session.scalar(
                 select(func.count())
                 .select_from(OutboxMessage)
-                .where(OutboxMessage.conversation_id == inbound.conversation.id)
+                .where(OutboxMessage.conversation_id == conversation_id)
             )
         assert assistant_count == 0
         assert outbox_count == 0
@@ -370,7 +522,7 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
             WorkExecutionResult(
                 outbound=OutboundDraft(
                     channel="telegram",
-                    external_chat_id=inbound.conversation.external_chat_id,
+                    external_chat_id=f"atomic-chat-{suffix}",
                     text="reply",
                     origin="model",
                     metadata={"work_id": -1},
@@ -382,7 +534,7 @@ async def test_work_queue_claim_fencing_retry_and_atomic_completion() -> None:
         assert completion.message.metadata["work_id"] == outbound_work.work.id
         assert len(completion.outbox) == 1
         for row in completion.outbox:
-            await chat_repo.mark_outbox_sent(row.id, "test-message-id")
+            await repo.mark_outbox_sent(row.id, "test-message-id")
         completed = await work_repo.get_work(outbound_work.work.id)
         assert completed is not None
         assert completed.status == "succeeded"

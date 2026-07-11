@@ -4,10 +4,12 @@ Jasi is a minimal Telegram passive-chat MVP:
 
 ```text
 Telegram private text
--> PassiveChatService
+-> PassiveIngressService
+-> durable Work
+-> WorkWorker / AgentWorkHandler
 -> AgentRuntime(passive profile)
 -> OpenAI-compatible Chat Completions and tools
--> PostgreSQL persistence
+-> WorkFinalizer
 -> Outbox
 -> Telegram reply
 ```
@@ -20,18 +22,22 @@ no attachments, one configured model, one runtime process, and one tool
 
 - `AgentRuntime` only depends on `RuntimeRepositoryPort` for history, Turns, and tool
   records. It never imports channel or Outbox code.
-- `PassiveChatService` depends on `ChatRepositoryPort`. It maps a runtime result through
-  the channel's outbound policy and commits the assistant message, Outbox parts, and
-  completed inbound state atomically.
+- `PassiveIngressService` only commits the inbound event, user message, and passive Work
+  atomically. Telegram can acknowledge an update as soon as that transaction succeeds.
+- `AgentWorkHandler` converts persisted Work into a typed runtime request. It has no
+  Telegram-specific behavior.
+- `WorkFinalizer` applies the target channel's outbound policy, then atomically commits
+  the completed Work, assistant message, Outbox parts, and inbound state.
 - `OutboxWorker` depends on `OutboxRepositoryPort` and dispatches each record through
   the sender registered for that channel.
 - PostgreSQL uses one repository implementation for these three narrow ports; callers
   only receive the capability they need.
 
-An inbound event remains recoverable until its Outbox records are committed. Completed
-runtime results are checkpointed on the Turn, so replay after a response-transaction
-failure does not call the model again. Telegram advances its polling offset only after
-the entire fetched batch has been handled successfully.
+An inbound event becomes durable before model execution. Completed runtime results are
+checkpointed by Work ID on the Turn, so replay after a finalization failure does not call
+the model again. PostgreSQL leases serialize all Work for one session while allowing
+different sessions to execute concurrently. Telegram advances its polling offset once
+the fetched updates have been durably enqueued.
 
 ## Run Locally
 
@@ -79,8 +85,9 @@ error if the migration is missing or stale.
 
 Create a bot with BotFather, set `JASI_TELEGRAM_BOT_TOKEN`, and configure
 `JASI_TELEGRAM_ALLOWED_USER_IDS` with comma-separated numeric Telegram user IDs.
-An empty allowlist is rejected at startup. `JASI_TELEGRAM_MAX_CONCURRENCY` bounds work
-across chats; messages in the same chat remain serialized by the service.
+An empty allowlist is rejected at startup. `JASI_TELEGRAM_MAX_CONCURRENCY` bounds inbound
+database work; `JASI_WORK_BATCH_SIZE` bounds agent execution. Messages in one chat are
+serialized by the durable Work queue.
 
 ## Tests
 

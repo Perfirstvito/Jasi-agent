@@ -76,6 +76,12 @@ class WorkWorker:
         lease_seconds: float = 600,
         idle_sleep_seconds: float = 1,
     ) -> None:
+        if batch_size <= 0:
+            raise ValueError("work batch size must be positive")
+        if lease_seconds <= 0:
+            raise ValueError("work lease must be positive")
+        if idle_sleep_seconds <= 0:
+            raise ValueError("work idle sleep must be positive")
         self._repository = repository
         self._dispatcher = dispatcher
         self._finalizer = finalizer

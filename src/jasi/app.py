@@ -16,8 +16,11 @@ from jasi.adapters.persistence.postgres.db import (
     create_session_factory,
 )
 from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
+from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
+from jasi.application.agent_work import AgentWorkHandler
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
-from jasi.application.passive_service import PassiveChatService
+from jasi.application.passive_service import PassiveIngressService
+from jasi.application.work import WorkDispatcher, WorkFinalizer, WorkWorker
 from jasi.config import SettingsError, load_settings
 from jasi.logging import configure_logging
 from jasi.runtime.profile import PASSIVE_PROFILE
@@ -41,18 +44,19 @@ async def run() -> None:
 
         session_factory = create_session_factory(engine)
         repository = SQLAlchemyRepository(session_factory)
+        work_repository = SQLAlchemyWorkRepository(session_factory)
         channel = TelegramBotClient(
             bot_token=settings.telegram_bot_token,
             request_timeout_seconds=30,
         )
         outbox_wakeup = asyncio.Event()
-        dispatcher = OutboxDispatcher(
+        outbox_dispatcher = OutboxDispatcher(
             repository=repository,
             channels={"telegram": channel},
         )
-        worker = OutboxWorker(
+        outbox_worker = OutboxWorker(
             repository=repository,
-            dispatcher=dispatcher,
+            dispatcher=outbox_dispatcher,
             batch_size=settings.outbox_batch_size,
             wakeup=outbox_wakeup,
         )
@@ -63,7 +67,7 @@ async def run() -> None:
         )
         tools = ToolRegistry([get_current_time_tool])
         runtime = AgentRuntime(
-            profile=PASSIVE_PROFILE,
+            profiles={PASSIVE_PROFILE.name: PASSIVE_PROFILE},
             model=model,
             repository=repository,
             tools=tools,
@@ -71,11 +75,29 @@ async def run() -> None:
             model_timeout_seconds=settings.model_timeout_seconds,
             timezone=settings.timezone,
         )
-        service = PassiveChatService(
-            repository=repository,
-            runtime=runtime,
-            outbound_policies={"telegram": TelegramOutboundPolicy()},
-            outbox_wakeup=outbox_wakeup,
+        work_wakeup = asyncio.Event()
+        work_dispatcher = WorkDispatcher(
+            {
+                "agent": AgentWorkHandler(
+                    runtime=runtime,
+                    conversations=repository,
+                )
+            }
+        )
+        work_worker = WorkWorker(
+            repository=work_repository,
+            dispatcher=work_dispatcher,
+            finalizer=WorkFinalizer(
+                repository=work_repository,
+                outbound_policies={"telegram": TelegramOutboundPolicy()},
+                outbox_wakeup=outbox_wakeup,
+            ),
+            batch_size=settings.work_batch_size,
+            wakeup=work_wakeup,
+        )
+        service = PassiveIngressService(
+            repository=work_repository,
+            work_wakeup=work_wakeup,
         )
         telegram = TelegramLongPollingAdapter(
             bot_token=settings.telegram_bot_token,
@@ -86,13 +108,17 @@ async def run() -> None:
 
         stop_event = asyncio.Event()
         _install_signal_handlers(stop_event)
-        worker_task = asyncio.create_task(worker.run(stop_event), name="jasi-outbox-worker")
+        worker_tasks = [
+            asyncio.create_task(work_worker.run(stop_event), name="jasi-work-worker"),
+            asyncio.create_task(outbox_worker.run(stop_event), name="jasi-outbox-worker"),
+        ]
         try:
             await telegram.run(service, stop_event)
         finally:
             stop_event.set()
+            work_wakeup.set()
             outbox_wakeup.set()
-            await worker_task
+            await asyncio.gather(*worker_tasks)
     except Exception as exc:
         logger.exception("jasi failed to start or run")
         raise SystemExit(str(exc)) from exc

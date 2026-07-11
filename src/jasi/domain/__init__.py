@@ -8,6 +8,7 @@ from jasi.domain.models import (
     OutboundMessage,
     OutboxRecord,
 )
+from jasi.domain.operations import OperationsSnapshot
 from jasi.domain.schedule import (
     ScheduleCreateResult,
     ScheduleJobRecord,
@@ -45,6 +46,7 @@ __all__ = [
     "OutboundMessage",
     "OutboundDraft",
     "OutboxRecord",
+    "OperationsSnapshot",
     "ScheduleCreateResult",
     "ScheduleJobRecord",
     "ScheduleSpec",

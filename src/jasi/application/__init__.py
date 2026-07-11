@@ -2,6 +2,7 @@ from jasi.application.agent_work import AgentWorkCommand, AgentWorkHandler
 from jasi.application.direct_work import DirectWorkCommand, DirectWorkHandler
 from jasi.application.drift import DriftOpportunityProducer
 from jasi.application.effect import EffectDispatcher, EffectWorker
+from jasi.application.operations import OperationsService
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
 from jasi.application.passive_service import PassiveIngressService
 from jasi.application.schedule import ScheduleService, ScheduleWorker
@@ -16,6 +17,7 @@ from jasi.application.work import WorkDispatcher, WorkFinalizer, WorkHandler, Wo
 __all__ = [
     "OutboxDispatcher",
     "OutboxWorker",
+    "OperationsService",
     "PassiveIngressService",
     "WorkDispatcher",
     "WorkFinalizer",

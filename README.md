@@ -37,6 +37,10 @@ Effect Outbox. A source poll commits its cursor, items, and effect records atomi
 EffectWorker executes them later with deduplication and retry. Effect adapters are also
 explicitly registered and none are enabled by default.
 
+`OperationsService.snapshot()` provides aggregate queue counts, due trigger counts, and
+expired Work lease counts for health checks. It intentionally returns no prompts,
+message text, source payloads, credentials, or other sensitive records.
+
 Drift uses the same InitiativePlanner and AgentWorkHandler with a different candidate
 source and Runtime Profile. `DriftOpportunityProducer` persists ideas from future
 source/Skill/Memory producers. The planner waits for the configured idle window and

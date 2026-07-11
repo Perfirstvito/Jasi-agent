@@ -1,0 +1,119 @@
+# 主动链路实施审计
+
+## 当前执行面
+
+```text
+Telegram Update ----> PassiveIngressService -----------+
+Schedule Clock -----> ScheduleWorker -> Occurrence ----+
+Source Clock --------> SourceWorker -> SourceItem ------+--> durable Work
+Drift Producer ------> DriftOpportunity ---------------+         |
+                                                               WorkWorker
+                                                        direct / agent handler
+                                                                  |
+                                                        WorkFinalizer transaction
+                                                                  |
+                                            assistant message + Message Outbox
+                                                                  |
+                                               OutboxWorker -> ChannelPort
+
+Source poll transaction -> Effect Outbox -> EffectWorker -> EffectPort
+```
+
+AgentRuntime 只接收通用 `TurnRequest`，负责 Profile、历史、模型/工具循环、Hook、Turn 和
+ToolExecution。它不导入 Trigger、Telegram、Outbox、Schedule、Source、Drift 或 SQLAlchemy。
+
+## 分阶段结果
+
+| 阶段 | 结果 |
+| --- | --- |
+| Phase 0 | 完成 Akashic passive/proactive/drift/schedule 审计、竞态矩阵和目标边界 |
+| Phase 1 | PostgreSQL durable Work、priority、session serialization、lease fencing |
+| Phase 2 | Passive 入站原子 enqueue；Work ID Turn 恢复；统一 Message Outbox |
+| Phase 3 | 独立 at/interval/cron schedule、唯一 occurrence、direct/agent action |
+| Phase 4 | SourcePort、持久化 cursor/items、proactive cooldown planner |
+| Phase 5 | DriftOpportunity、idle/cooldown gate、共享 InitiativePlanner/Runtime |
+| Phase 6 | Work heartbeat、后台配额、Effect Outbox、运维聚合查询 |
+
+Prompt 抽象仍按原决定延后。现在已有 passive/scheduled/proactive/drift 四个真实 Profile，但它们的
+差异仍能由 `RuntimeProfile` 直接表达；尚没有足够证据证明需要额外 Prompt DSL 或依赖图。
+
+## 不变量证据
+
+### 1. 只有 OutboxWorker 调用用户 Channel
+
+生产代码中唯一的 `channel.send(...)` 位于 `application/outbox.py`。Schedule direct、模型回复、
+proactive 和 drift 全部先由 WorkFinalizer 写 Message Outbox。EffectWorker 使用独立 EffectPort，
+不能获得 ChannelPort。
+
+### 2. 同一 dedupe key 最多一个 Work
+
+`work_items.dedupe_key` 有唯一约束；enqueue 使用 PostgreSQL `ON CONFLICT DO NOTHING`。单元与
+PostgreSQL 集成测试覆盖重复 enqueue。
+
+### 3. 同一 schedule occurrence 最多一个 Work
+
+`(job_id, scheduled_for)` 和 `work_item_id` 在 `schedule_occurrences` 上均唯一。Scheduler 在锁住
+job 的同一事务中创建 Work、Occurrence 并推进 `next_run_at`。
+
+### 4. 同一 session 不并发执行两个 Work
+
+claim 使用 session rank、running 排除和 `status='running'` 的 session 唯一部分索引。领取事务
+还使用 PostgreSQL advisory transaction lock 来原子计算后台配额。并发 claimant 测试验证不会
+重复或跨类型并发领取。
+
+### 5. Passive 优先于尚未开始的主动 Work
+
+claim 先选择 priority-100 passive，再在剩余容量和后台配额内选择 scheduled/proactive/drift。
+WorkWorker 不等待整批后台任务结束才继续 claim。测试覆盖两个后台任务运行时新 passive 仍可执行，
+以及同一 session proactive pending 时 passive 先被领取。Passive 入站还会取消 pending drift。
+
+### 6. Runtime 成功、Finalizer 失败后不重复请求模型
+
+Turn 以 `work_item_id` 唯一恢复。Runtime 结果提交后，Finalizer 的 assistant/Outbox 事务即使失败，
+Work 重试会读取 cached TurnResult。单元测试模拟 Finalizer 失败并断言模型请求数保持为 1。
+
+### 7. 内部输入不污染用户历史
+
+Schedule/proactive/drift 的 input 只存在 Work 和 TurnRequest，不插入 user Message。集成测试验证
+模型能看到 source/drift input，但数据库 conversation history 只包含真实 user 和已送达 assistant。
+
+### 8. 只有 sent assistant 进入 Runtime 历史
+
+Repository 只读取 user Message，以及 `delivery_status='sent'` 且非 `system_error` 的 assistant。
+分段集成测试验证第一段送达后仍不可见，最后一段送达后才进入历史；failed/pending assistant 不可见。
+
+### 9. 重启恢复 pending Work、Outbox 和 Effect
+
+三类队列都以 PostgreSQL 状态为准。Work 使用可续租 lease；Message Outbox 和 Effect Outbox 会回收
+stale executing/delivering 记录。集成测试用新 Repository/Worker 实例恢复 pending effect，并验证
+Work/Outbox 并发领取不重复。
+
+### 10. 新 Source 或 Channel 不修改 Runtime 主循环
+
+Source 通过显式 `SourcePort` registry 注册，Channel 通过 OutboxDispatcher registry 注册。Runtime
+只按 request.profile 从 Profile mapping 选择配置；新增 scheduled/proactive/drift 未增加模型循环分支。
+
+## 竞态处理
+
+| 竞态 | 当前处理 |
+| --- | --- |
+| 同 chat 并发 Telegram Update 争用 message sequence | conversation upsert 行锁 + 唯一 sequence |
+| 重复 Telegram Update | inbound event 唯一约束 + 同事务 passive Work |
+| Work lease 到期后旧执行仍运行 | heartbeat；续租失败取消旧 task；Finalizer token fencing |
+| 多 worker 超过后台模型配额 | advisory claim lock + running background count |
+| passive 到达 pending drift 之后 | 入站事务将该 session pending drift 标为 cancelled |
+| 两个 scheduler tick 同时看到 due job | job `FOR UPDATE SKIP LOCKED` + occurrence unique |
+| source poll 重放 | subscription cursor 与 source item upsert 同事务 |
+| 两个 initiative planner 选同候选 | candidate row lock + session rank + initiative state row lock |
+| source 标记完成但 ACK 尚未执行 | ACK 先持久化 Effect Outbox，Worker 后执行 |
+| 第一分段失败、后续分段先发送 | Outbox 只领取所有前序分段已 sent 的记录；终止失败取消后续分段 |
+
+## 明确语义与剩余边界
+
+- Telegram 和一般外部 Effect 只能保证 at-least-once。发送/执行成功后、状态提交前崩溃仍可能重复；
+  支持幂等键的 adapter 应使用 `outbox_id` 或 `effect.dedupe_key`。
+- Interval 和 cron misfire 采用 coalesce：恢复后创建一个 occurrence，下一次推进到当前时间之后。
+- 取消 schedule 只阻止未来 occurrence，不撤销已经 materialize 的 Work。
+- 项目提供 SourcePort、EffectPort 和 DriftOpportunityProducer 边界，但默认不注册具体外部 connector。
+- Schedule 创建当前通过 `ScheduleService`，尚未暴露 Telegram 命令或模型工具。
+- 首版仍是单应用进程；数据库约束、lease 和 SKIP LOCKED 已允许未来多 worker，但没有分布式限流服务。

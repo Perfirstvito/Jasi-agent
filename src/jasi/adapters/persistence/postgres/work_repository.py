@@ -123,13 +123,14 @@ class SQLAlchemyWorkRepository:
                 max_attempts=5,
             )
             session.add(work)
+            now = datetime.now(UTC)
             await session.execute(
                 pg_insert(InitiativeState)
                 .values(
                     session_id=work.session_id,
                     conversation_id=conversation.id,
                     last_user_at=message.received_at.astimezone(UTC),
-                    updated_at=datetime.now(UTC),
+                    updated_at=now,
                 )
                 .on_conflict_do_update(
                     index_elements=[InitiativeState.session_id],
@@ -138,8 +139,22 @@ class SQLAlchemyWorkRepository:
                             InitiativeState.last_user_at,
                             message.received_at.astimezone(UTC),
                         ),
-                        "updated_at": datetime.now(UTC),
+                        "updated_at": now,
                     },
+                )
+            )
+            await session.execute(
+                update(WorkItem)
+                .where(
+                    WorkItem.session_id == work.session_id,
+                    WorkItem.kind == "drift",
+                    WorkItem.status == "pending",
+                )
+                .values(
+                    status="cancelled",
+                    completed_at=now,
+                    updated_at=now,
+                    last_error="superseded_by_user_activity",
                 )
             )
             await session.flush()

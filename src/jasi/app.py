@@ -31,7 +31,12 @@ from jasi.application.source import InitiativePlanner, SourceDispatcher, SourceW
 from jasi.application.work import WorkDispatcher, WorkFinalizer, WorkWorker
 from jasi.config import SettingsError, load_settings
 from jasi.logging import configure_logging
-from jasi.runtime.profile import PASSIVE_PROFILE, PROACTIVE_PROFILE, SCHEDULED_PROFILE
+from jasi.runtime.profile import (
+    DRIFT_PROFILE,
+    PASSIVE_PROFILE,
+    PROACTIVE_PROFILE,
+    SCHEDULED_PROFILE,
+)
 from jasi.runtime.runtime import AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -82,6 +87,7 @@ async def run() -> None:
                 PASSIVE_PROFILE.name: PASSIVE_PROFILE,
                 PROACTIVE_PROFILE.name: PROACTIVE_PROFILE,
                 SCHEDULED_PROFILE.name: SCHEDULED_PROFILE,
+                DRIFT_PROFILE.name: DRIFT_PROFILE,
             },
             model=model,
             repository=repository,
@@ -124,19 +130,27 @@ async def run() -> None:
             poll_seconds=settings.schedule_poll_seconds,
         )
         source_wakeup = asyncio.Event()
-        initiative_wakeup = asyncio.Event()
+        proactive_wakeup = asyncio.Event()
+        drift_wakeup = asyncio.Event()
         source_worker = SourceWorker(
             repository=source_repository,
             dispatcher=SourceDispatcher({}),
             batch_size=settings.source_batch_size,
             source_wakeup=source_wakeup,
-            initiative_wakeup=initiative_wakeup,
+            initiative_wakeup=proactive_wakeup,
         )
         proactive_planner = InitiativePlanner(
             kind="proactive",
             repository=initiative_repository,
             batch_size=settings.initiative_batch_size,
-            initiative_wakeup=initiative_wakeup,
+            initiative_wakeup=proactive_wakeup,
+            work_wakeup=work_wakeup,
+        )
+        drift_planner = InitiativePlanner(
+            kind="drift",
+            repository=initiative_repository,
+            batch_size=settings.drift_batch_size,
+            initiative_wakeup=drift_wakeup,
             work_wakeup=work_wakeup,
         )
         telegram = TelegramLongPollingAdapter(
@@ -154,6 +168,7 @@ async def run() -> None:
                 proactive_planner.run(stop_event),
                 name="jasi-proactive-planner",
             ),
+            asyncio.create_task(drift_planner.run(stop_event), name="jasi-drift-planner"),
             asyncio.create_task(schedule_worker.run(stop_event), name="jasi-schedule-worker"),
             asyncio.create_task(work_worker.run(stop_event), name="jasi-work-worker"),
             asyncio.create_task(outbox_worker.run(stop_event), name="jasi-outbox-worker"),
@@ -163,7 +178,8 @@ async def run() -> None:
         finally:
             stop_event.set()
             source_wakeup.set()
-            initiative_wakeup.set()
+            proactive_wakeup.set()
+            drift_wakeup.set()
             schedule_wakeup.set()
             work_wakeup.set()
             outbox_wakeup.set()

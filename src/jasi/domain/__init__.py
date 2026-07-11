@@ -1,3 +1,4 @@
+from jasi.domain.drift import DriftOfferResult, DriftOpportunityRecord, DriftOpportunitySpec
 from jasi.domain.models import (
     ConversationRecord,
     DeliveryResult,
@@ -32,6 +33,9 @@ from jasi.domain.work import (
 __all__ = [
     "ConversationRecord",
     "DeliveryResult",
+    "DriftOfferResult",
+    "DriftOpportunityRecord",
+    "DriftOpportunitySpec",
     "InboundMessage",
     "MessageRecord",
     "OutboundMessage",

@@ -32,6 +32,13 @@ is reserved in the same transaction as that Work. Source text is runtime input, 
 user chat message. The repository currently ships the connector boundary and workers,
 but no concrete external feed connector is enabled by default.
 
+Drift uses the same InitiativePlanner and AgentWorkHandler with a different candidate
+source and Runtime Profile. `DriftOpportunityProducer` persists ideas from future
+source/Skill/Memory producers. The planner waits for the configured idle window and
+cooldown before creating priority-20 Work. A new passive message atomically cancels any
+pending drift Work for that session, so a stale conversation opener cannot follow a
+fresh user message.
+
 ## Boundaries and Recovery
 
 - `AgentRuntime` only depends on `RuntimeRepositoryPort` for history, Turns, and tool

@@ -19,7 +19,13 @@ Telegram private text
 
 The first profile is intentionally narrow: private Telegram text only, no group chat,
 no attachments, one main Runtime model, one lightweight background model, one runtime
-process, and one tool (`get_current_time`).
+process, one functional tool (`get_current_time`), and the `tool_search` discovery tool.
+
+Tools are registered explicitly. A Runtime Profile defines the chain-wide ceiling and its
+base visible tools; an optional Work grant can only narrow non-base tools for one durable
+task. `tool_search` searches only authorized hidden tools, and successful matches become
+visible on the next model step. Runtime applies every reveal request generically and never
+special-cases the search tool. See [Tool MVP Architecture](docs/architecture/tool-mvp.md).
 
 Scheduled jobs are a separate timing domain. `at`, `interval`, and cron rules create a
 unique occurrence and a durable Work in one transaction. A `direct` job skips the model;

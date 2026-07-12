@@ -17,15 +17,32 @@ Telegram private text
 -> delivered-passive MemoryJob -> Markdown authority + PostgreSQL index
 ```
 
-The first profile is intentionally narrow: private Telegram text only, no group chat,
-no attachments, one main Runtime model, one lightweight background model, one runtime
-process, one functional tool (`get_current_time`), and the `tool_search` discovery tool.
+The first channel is intentionally narrow: private Telegram text only, no group chat,
+no attachments, one main Runtime model, one lightweight background model, and one runtime
+process. Runtime starts each Turn with `get_current_time` and `tool_search`; authorized built-in
+tools are disclosed only when the model searches for the capability it needs.
 
 Tools are registered explicitly. A Runtime Profile defines the chain-wide ceiling and its
 base visible tools; an optional Work grant can only narrow non-base tools for one durable
 task. `tool_search` searches only authorized hidden tools, and successful matches become
 visible on the next model step. Runtime applies every reveal request generically and never
 special-cases the search tool. See [Tool MVP Architecture](docs/architecture/tool-mvp.md).
+
+The built-in catalog contains public web search/fetch, workspace-confined file read/list/write/
+edit, allowlisted foreground/background commands, and delivered-message search/fetch. Passive
+chat may unlock the complete catalog. Scheduled, proactive, and drift Profiles receive narrower
+read-only subsets. `JASI_TOOL_WORKSPACE` confines all file and command access; Shell executes one
+allowlisted program directly without a shell, pipes, redirects, executable options, or paths
+outside that workspace.
+
+`web_fetch` rejects non-public DNS targets. Networks using Clash-style fake-IP DNS may opt in
+with `JASI_WEB_ALLOW_FAKE_IP_DNS=true`; this permits domain resolutions in `198.18.0.0/15` but
+still rejects literal requests to that reserved range.
+
+Jasi deliberately does not expose Akashic's `message_push` as a model tool. User-visible output
+continues through Work finalization and the durable Outbox, so a tool call cannot bypass channel
+policy or cause a second send. Memory mutation, scheduling, Skills, Spawn, vision, and MCP
+lifecycle remain separate capabilities and are not part of this built-in migration.
 
 Scheduled jobs are a separate timing domain. `at`, `interval`, and cron rules create a
 unique occurrence and a durable Work in one transaction. A `direct` job skips the model;

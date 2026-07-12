@@ -13,6 +13,7 @@ from jasi.domain.models import (
     OutboundPart,
     OutboxRecord,
 )
+from jasi.domain.processes import ProcessRecord, ProcessScope, ProcessSnapshot
 from jasi.domain.work import (
     WorkCompletion,
     WorkEnqueueResult,
@@ -62,6 +63,23 @@ class FakeChannel:
         if self.results:
             return self.results.pop(0)
         return DeliveryResult(success=True, external_message_id=f"sent-{len(self.sent)}")
+
+
+class FakeProcessLookup:
+    def __init__(
+        self,
+        snapshots: dict[ProcessScope, tuple[ProcessRecord, ...]] | None = None,
+    ) -> None:
+        self.snapshots = snapshots or {"runtime": (), "windows": ()}
+        self.calls: list[ProcessScope] = []
+
+    @property
+    def available_scopes(self) -> frozenset[ProcessScope]:
+        return frozenset(self.snapshots)
+
+    async def inspect(self, scope: ProcessScope) -> ProcessSnapshot:
+        self.calls.append(scope)
+        return ProcessSnapshot(scope=scope, processes=self.snapshots[scope])
 
 
 class FakeOutboundPolicy:
@@ -325,8 +343,7 @@ class FakeRepository:
             and all(
                 prior.status == "sent"
                 for prior in self.outbox.values()
-                if prior.message_id == row.message_id
-                and prior.segment_index < row.segment_index
+                if prior.message_id == row.message_id and prior.segment_index < row.segment_index
             )
         ]
         ready.sort(key=lambda row: row.id)
@@ -378,6 +395,7 @@ class FakeRepository:
             replace(row, delivery_status=status) if row.id == message_id else row
             for row in self.messages
         ]
+
 
 class FakeWorkRepository:
     def __init__(self) -> None:
@@ -447,9 +465,7 @@ class FakeWorkRepository:
                     updated_at=now,
                 )
 
-        running_sessions = {
-            row.session_id for row in self.work.values() if row.status == "running"
-        }
+        running_sessions = {row.session_id for row in self.work.values() if row.status == "running"}
         candidates = sorted(
             (
                 row

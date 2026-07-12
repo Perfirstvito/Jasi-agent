@@ -34,6 +34,7 @@ def test_embedding_is_explicitly_optional(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.light_model_api_key == settings.openai_api_key
     assert settings.light_model == settings.openai_model
     assert settings.tool_workspace == "workspace/tools"
+    assert settings.shell_network_enabled is False
     assert settings.web_allow_fake_ip_dns is False
 
 

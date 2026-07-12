@@ -12,6 +12,7 @@ _CORE_TOOLS = frozenset({"get_current_time", "tool_search"})
 _WEB_TOOLS = frozenset({"web_search", "web_fetch"})
 _FILE_READ_TOOLS = frozenset({"read_file", "list_dir"})
 _MESSAGE_TOOLS = frozenset({"search_messages", "fetch_messages"})
+_HOST_READ_TOOLS = frozenset({"list_processes"})
 _OPERATOR_TOOLS = frozenset({"write_file", "edit_file", "shell", "task_output", "task_stop"})
 
 
@@ -69,7 +70,14 @@ PASSIVE_PROFILE = RuntimeProfile(
     name="passive",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=(_CORE_TOOLS | _WEB_TOOLS | _FILE_READ_TOOLS | _MESSAGE_TOOLS | _OPERATOR_TOOLS),
+    allowed_tools=(
+        _CORE_TOOLS
+        | _WEB_TOOLS
+        | _FILE_READ_TOOLS
+        | _MESSAGE_TOOLS
+        | _HOST_READ_TOOLS
+        | _OPERATOR_TOOLS
+    ),
     base_tools=_CORE_TOOLS,
     include_memory=True,
     hooks=_default_hooks("passive"),

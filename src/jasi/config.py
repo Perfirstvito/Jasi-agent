@@ -24,6 +24,7 @@ class Settings:
     telegram_allowed_user_ids: frozenset[int]
     prompt_dir: str = "prompts"
     tool_workspace: str = "workspace/tools"
+    shell_network_enabled: bool = False
     web_allow_fake_ip_dns: bool = False
     memory_scope_map: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     memory_root: str = "workspace/memory"
@@ -203,6 +204,7 @@ def load_settings() -> Settings:
         prompt_dir=os.environ.get("JASI_PROMPT_DIR", "prompts").strip() or "prompts",
         tool_workspace=os.environ.get("JASI_TOOL_WORKSPACE", "workspace/tools").strip()
         or "workspace/tools",
+        shell_network_enabled=_bool("JASI_SHELL_NETWORK_ENABLED", False),
         web_allow_fake_ip_dns=_bool("JASI_WEB_ALLOW_FAKE_IP_DNS", False),
         memory_scope_map=_memory_scope_map(),
         memory_root=os.environ.get("JASI_MEMORY_ROOT", "workspace/memory").strip()

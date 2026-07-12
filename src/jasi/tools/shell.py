@@ -2,42 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shlex
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from jasi.runtime.errors import ToolRejected
+from jasi.tools.command_policy import (
+    CommandPolicyPipeline,
+    CommandPolicyRejected,
+    CommandPolicyState,
+    build_default_command_policy,
+)
 from jasi.tools.filesystem import FileWorkspace
 from jasi.tools.registry import ToolExecutionContext, ToolOutcome, ToolSpec
+from jasi.tools.sandbox import BubblewrapSandbox, CommandSandbox
 
-_ALLOWED_COMMANDS = frozenset(
-    {
-        "cat",
-        "date",
-        "echo",
-        "find",
-        "grep",
-        "head",
-        "ls",
-        "pwd",
-        "rg",
-        "sleep",
-        "sort",
-        "tail",
-        "uniq",
-        "wc",
-    }
-)
-_SHELL_OPERATORS = frozenset({"|", "||", "&", "&&", ";", ">", ">>", "<", "<<"})
 _MAX_OUTPUT_BYTES = 30_000
 _MAX_BACKGROUND_TASKS = 32
-_DEFAULT_TIMEOUT_SECONDS = 30
-_MAX_TIMEOUT_SECONDS = 120
-_COMMAND_PATH = "/usr/local/bin:/usr/bin:/bin"
+_DEFAULT_TIMEOUT_SECONDS = 60
+_DEFAULT_BACKGROUND_TIMEOUT_SECONDS = 3600
+_MAX_TIMEOUT_SECONDS = 3600
 
 
 @dataclass
@@ -46,6 +33,7 @@ class _CommandTask:
     owner_session_id: str
     process: asyncio.subprocess.Process
     command: str
+    executed_command: str
     description: str
     started_at: float
     output: bytearray
@@ -57,36 +45,54 @@ class _CommandTask:
 
 
 class CommandTaskManager:
-    def __init__(self, workspace: FileWorkspace) -> None:
+    def __init__(
+        self,
+        workspace: FileWorkspace,
+        *,
+        sandbox: CommandSandbox | None = None,
+    ) -> None:
         self._workspace = workspace
+        self._sandbox = sandbox or BubblewrapSandbox(workspace)
         self._tasks: dict[str, _CommandTask] = {}
+
+    @property
+    def sandbox_available(self) -> bool:
+        return self._sandbox.available
+
+    @property
+    def sandbox_unavailable_reason(self) -> str | None:
+        return self._sandbox.unavailable_reason
 
     async def run_foreground(
         self,
         *,
-        argv: list[str],
+        command: str,
+        display_command: str,
         cwd: Path,
         timeout_seconds: int,
     ) -> dict[str, Any]:
-        process = await self._spawn(argv, cwd)
+        process = await self._spawn(command, cwd, timeout_seconds)
         started = time.monotonic()
         timed_out = False
+        capture_task = asyncio.create_task(
+            _capture_output(process),
+            name=f"jasi-command-capture-{process.pid}",
+        )
+        completion = asyncio.gather(process.wait(), capture_task)
         try:
-            stdout, _ = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout_seconds,
-            )
+            await asyncio.wait_for(asyncio.shield(completion), timeout=timeout_seconds)
         except TimeoutError:
             timed_out = True
             _kill_process_tree(process)
-            stdout, _ = await process.communicate()
+            await completion
         except asyncio.CancelledError:
             _kill_process_tree(process)
-            await process.communicate()
+            await asyncio.shield(completion)
             raise
-        output, truncated = _bounded_output(stdout)
+        output, truncated = capture_task.result()
         return {
-            "command": shlex.join(argv),
+            "command": display_command,
+            "executed_command": command,
             "exit_code": process.returncode,
             "duration_ms": int((time.monotonic() - started) * 1000),
             "timed_out": timed_out,
@@ -97,22 +103,24 @@ class CommandTaskManager:
     async def start_background(
         self,
         *,
-        argv: list[str],
+        command: str,
+        display_command: str,
         cwd: Path,
         owner_session_id: str,
         description: str,
-        timeout_seconds: int | None,
+        timeout_seconds: int,
     ) -> dict[str, Any]:
         self._prune()
         if len(self._tasks) >= _MAX_BACKGROUND_TASKS:
             raise ToolRejected("too many background command tasks")
-        process = await self._spawn(argv, cwd)
+        process = await self._spawn(command, cwd, timeout_seconds)
         task_id = uuid4().hex[:12]
         record = _CommandTask(
             task_id=task_id,
             owner_session_id=owner_session_id,
             process=process,
-            command=shlex.join(argv),
+            command=display_command,
+            executed_command=command,
             description=description,
             started_at=time.monotonic(),
             output=bytearray(),
@@ -122,14 +130,14 @@ class CommandTaskManager:
             self._pump(record),
             name=f"jasi-command-{task_id}",
         )
-        if timeout_seconds is not None:
-            record.timeout_task = asyncio.create_task(
-                self._timeout(record, timeout_seconds),
-                name=f"jasi-command-timeout-{task_id}",
-            )
+        record.timeout_task = asyncio.create_task(
+            self._timeout(record, timeout_seconds),
+            name=f"jasi-command-timeout-{task_id}",
+        )
         return {
             "background_task_id": task_id,
             "command": record.command,
+            "executed_command": record.executed_command,
             "status": "running",
             "timeout_seconds": timeout_seconds,
         }
@@ -170,26 +178,34 @@ class CommandTaskManager:
             for record in self._tasks.values()
             if record.timeout_task is not None
         ]
-        for record in self._tasks.values():
-            if record.timeout_task is not None and not record.timeout_task.done():
-                record.timeout_task.cancel()
+        for task in timeouts:
+            if not task.done():
+                task.cancel()
         if pumps or timeouts:
             await asyncio.gather(*pumps, *timeouts, return_exceptions=True)
         self._tasks.clear()
 
-    async def _spawn(self, argv: list[str], cwd: Path) -> asyncio.subprocess.Process:
+    async def _spawn(
+        self,
+        command: str,
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> asyncio.subprocess.Process:
+        launch = self._sandbox.build_launch(command, cwd, timeout_seconds)
         try:
             return await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=_command_environment(self._workspace.root),
+                *launch.argv,
+                cwd=launch.cwd,
+                env=dict(launch.env),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )
         except FileNotFoundError as exc:
-            raise ToolRejected(f"command is not installed: {argv[0]}") from exc
+            raise ToolRejected("command sandbox executable is unavailable") from exc
+        except PermissionError as exc:
+            raise ToolRejected("command sandbox could not be started") from exc
 
     async def _pump(self, record: _CommandTask) -> None:
         assert record.process.stdout is not None
@@ -197,10 +213,10 @@ class CommandTaskManager:
             chunk = await record.process.stdout.read(4096)
             if not chunk:
                 break
-            record.output.extend(chunk)
-            if len(record.output) > _MAX_OUTPUT_BYTES:
-                record.output_truncated = True
-                del record.output[: len(record.output) - _MAX_OUTPUT_BYTES]
+            record.output_truncated = (
+                _append_bounded(record.output, chunk, preserve_head=False)
+                or record.output_truncated
+            )
         await record.process.wait()
         record.finished_at = time.monotonic()
         if record.finish_reason == "running":
@@ -221,12 +237,11 @@ class CommandTaskManager:
         running = record.process.returncode is None
         output = bytes(record.output).decode("utf-8", errors="replace")
         status = "running" if running else record.finish_reason
-        if status == "running":
-            status = "completed"
         finished_at = record.finished_at or time.monotonic()
         return {
             "background_task_id": record.task_id,
             "command": record.command,
+            "executed_command": record.executed_command,
             "description": record.description,
             "status": status,
             "exit_code": record.process.returncode,
@@ -257,33 +272,41 @@ class CommandTaskManager:
 def create_shell_tools(
     workspace: FileWorkspace,
     manager: CommandTaskManager,
+    *,
+    policy: CommandPolicyPipeline | None = None,
 ) -> list[ToolSpec]:
+    command_policy = policy or build_default_command_policy()
+
     async def shell(arguments: dict[str, Any], context: ToolExecutionContext) -> ToolOutcome:
-        argv = _validate_command(arguments["command"], workspace)
+        decision = _evaluate(command_policy, arguments["command"])
         cwd = workspace.resolve(arguments.get("cwd", "."))
         if not cwd.exists() or not cwd.is_dir():
             raise ToolRejected("command working directory does not exist")
-        timeout_specified = "timeout" in arguments
-        timeout_seconds = int(arguments.get("timeout", _DEFAULT_TIMEOUT_SECONDS))
-        if bool(arguments.get("run_in_background", False)):
+        background = bool(arguments.get("run_in_background", False))
+        default_timeout = (
+            _DEFAULT_BACKGROUND_TIMEOUT_SECONDS if background else _DEFAULT_TIMEOUT_SECONDS
+        )
+        timeout_seconds = int(arguments.get("timeout", default_timeout))
+        if background:
             result = await manager.start_background(
-                argv=argv,
+                command=decision.command,
+                display_command=decision.original_command,
                 cwd=cwd,
                 owner_session_id=context.session_id,
                 description=arguments["description"],
-                timeout_seconds=timeout_seconds if timeout_specified else None,
-            )
-            return ToolOutcome(
-                content=result,
-                reveal_tools=("task_output", "task_stop"),
-            )
-        return ToolOutcome(
-            content=await manager.run_foreground(
-                argv=argv,
-                cwd=cwd,
                 timeout_seconds=timeout_seconds,
             )
+            return ToolOutcome(
+                content=_with_policy(result, decision),
+                reveal_tools=("task_output", "task_stop"),
+            )
+        result = await manager.run_foreground(
+            command=decision.command,
+            display_command=decision.original_command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
         )
+        return ToolOutcome(content=_with_policy(result, decision))
 
     async def task_output(
         arguments: dict[str, Any], context: ToolExecutionContext
@@ -301,14 +324,16 @@ def create_shell_tools(
         ToolSpec(
             name="shell",
             description=(
-                "Run one allowlisted read-only command inside the tool workspace. "
-                "Shell syntax, pipes, redirects, path traversal, and executable command "
-                "options are rejected. Long commands may run in the background."
+                "Run a full Bash command inside an isolated workspace sandbox. Pipes, redirects, "
+                "subcommands, interpreters, and ordinary system tools are supported. The project, "
+                "host filesystem, secrets, and host processes are not mounted; network is disabled "
+                "unless enabled by the operator. Standard deletion commands are rewritten to the "
+                "workspace .jasi-trash directory. Long commands may run in the background."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "minLength": 1},
+                    "command": {"type": "string", "minLength": 1, "maxLength": 20_000},
                     "description": {"type": "string", "minLength": 1, "maxLength": 80},
                     "cwd": {"type": "string", "minLength": 1, "default": "."},
                     "timeout": {
@@ -327,6 +352,7 @@ def create_shell_tools(
                 "run command",
                 "terminal",
                 "shell",
+                "bash",
                 "命令",
                 "终端",
                 "运行命令",
@@ -356,7 +382,7 @@ def create_shell_tools(
         ),
         ToolSpec(
             name="task_stop",
-            description="Stop a running background shell task.",
+            description="Stop a running background shell task and its sandboxed process tree.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -372,82 +398,20 @@ def create_shell_tools(
     ]
 
 
-def _validate_command(command: str, workspace: FileWorkspace) -> list[str]:
+def _evaluate(policy: CommandPolicyPipeline, command: str) -> CommandPolicyState:
     try:
-        argv = shlex.split(command, posix=True)
-    except ValueError as exc:
-        raise ToolRejected("command has invalid quoting") from exc
-    if not argv:
-        raise ToolRejected("command cannot be empty")
-    executable = argv[0]
-    if executable != Path(executable).name or executable not in _ALLOWED_COMMANDS:
-        raise ToolRejected(f"command is not allowlisted: {executable}")
-    if any(token in _SHELL_OPERATORS or "\n" in token or "\r" in token for token in argv):
-        raise ToolRejected("shell operators and multiline commands are not allowed")
-
-    denied_options = {
-        "date": ("-s", "--set"),
-        "find": (
-            "-delete",
-            "-exec",
-            "-execdir",
-            "-fprint",
-            "-fprint0",
-            "-fprintf",
-            "-fls",
-            "-ok",
-            "-okdir",
-            "-L",
-            "-H",
-        ),
-        "grep": ("-R", "--dereference-recursive"),
-        "ls": ("-L", "--dereference-command-line"),
-        "rg": ("-L", "--follow", "--pre", "--pre-glob"),
-        "sort": ("-o", "--output", "--compress-program"),
-    }
-    forbidden = denied_options.get(executable, ())
-    if any(
-        token == option or token.startswith(f"{option}=")
-        for token in argv[1:]
-        for option in forbidden
-    ):
-        raise ToolRejected(f"command option is not allowed for {executable}")
-
-    denied_compact_options = {
-        "date": ("-s",),
-        "grep": ("-R",),
-        "ls": ("-L",),
-        "rg": ("-L",),
-        "sort": ("-o",),
-    }
-    if any(
-        token.startswith(option)
-        for token in argv[1:]
-        for option in denied_compact_options.get(executable, ())
-    ):
-        raise ToolRejected(f"command option is not allowed for {executable}")
-
-    for token in argv[1:]:
-        value = token.split("=", 1)[-1] if "=" in token else token
-        if value.startswith("/") or value.startswith("~"):
-            raise ToolRejected("absolute and home-relative command paths are not allowed")
-        if ".." in Path(value).parts:
-            raise ToolRejected("command path traversal is not allowed")
-        candidate = workspace.root / value
-        if value in {".", "./"} or candidate.exists():
-            workspace.resolve(value)
-    return argv
+        return policy.evaluate(command)
+    except CommandPolicyRejected as exc:
+        raise ToolRejected(str(exc)) from exc
 
 
-def _command_environment(workspace: Path) -> dict[str, str]:
-    temporary = workspace / ".tmp"
-    temporary.mkdir(parents=True, exist_ok=True)
+def _with_policy(result: dict[str, Any], decision: CommandPolicyState) -> dict[str, Any]:
     return {
-        "PATH": _COMMAND_PATH,
-        "HOME": str(workspace),
-        "TMPDIR": str(temporary),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        **result,
+        "policy": {
+            "risk": decision.risk,
+            "rewrites": [asdict(rewrite) for rewrite in decision.rewrites],
+        },
     }
 
 
@@ -460,9 +424,29 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
         pass
 
 
-def _bounded_output(raw: bytes) -> tuple[str, bool]:
-    truncated = len(raw) > _MAX_OUTPUT_BYTES
+async def _capture_output(process: asyncio.subprocess.Process) -> tuple[str, bool]:
+    assert process.stdout is not None
+    captured = bytearray()
+    truncated = False
+    while True:
+        chunk = await process.stdout.read(4096)
+        if not chunk:
+            break
+        truncated = _append_bounded(captured, chunk, preserve_head=True) or truncated
+    raw = bytes(captured)
     if truncated:
         half = _MAX_OUTPUT_BYTES // 2
         raw = raw[:half] + b"\n...[output truncated]...\n" + raw[-half:]
     return raw.decode("utf-8", errors="replace"), truncated
+
+
+def _append_bounded(buffer: bytearray, chunk: bytes, *, preserve_head: bool) -> bool:
+    buffer.extend(chunk)
+    if len(buffer) <= _MAX_OUTPUT_BYTES:
+        return False
+    if preserve_head:
+        half = _MAX_OUTPUT_BYTES // 2
+        buffer[:] = buffer[:half] + buffer[-half:]
+    else:
+        del buffer[: len(buffer) - _MAX_OUTPUT_BYTES]
+    return True

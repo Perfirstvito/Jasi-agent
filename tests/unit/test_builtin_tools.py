@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from jasi.domain.processes import ProcessRecord
 from jasi.runtime.errors import ToolRejected
 from jasi.runtime.profile import (
     DRIFT_PROFILE,
@@ -17,10 +18,11 @@ from jasi.runtime.profile import (
 from jasi.tools.builtin import build_builtin_tool_registry
 from jasi.tools.filesystem import FileWorkspace, create_filesystem_tools
 from jasi.tools.messages import create_message_tools
+from jasi.tools.processes import create_process_tools
 from jasi.tools.registry import ToolExecutionContext, ToolRegistry
 from jasi.tools.shell import CommandTaskManager, create_shell_tools
 from jasi.tools.web import _render_response, _validate_public_url, create_web_tools
-from tests.unit.fakes import FakeRepository
+from tests.unit.fakes import FakeProcessLookup, FakeRepository
 
 _BUILTIN_TOOL_NAMES = frozenset(
     {
@@ -37,6 +39,7 @@ _BUILTIN_TOOL_NAMES = frozenset(
         "web_fetch",
         "search_messages",
         "fetch_messages",
+        "list_processes",
     }
 )
 
@@ -109,31 +112,78 @@ async def test_filesystem_tools_are_atomic_and_confined_to_workspace(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_shell_tools_reject_unsafe_commands_and_manage_owned_background_tasks(
+async def test_shell_supports_full_bash_in_isolation_and_manages_owned_background_tasks(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = FileWorkspace(tmp_path / "workspace")
     manager = CommandTaskManager(workspace)
+    if not manager.sandbox_available:
+        pytest.skip(manager.sandbox_unavailable_reason or "sandbox unavailable")
     registry = ToolRegistry(create_shell_tools(workspace, manager))
     owner = _context()
     try:
+        monkeypatch.setenv("JASI_TEST_SECRET", "must-not-leak")
+        outside = tmp_path / "outside-secret.txt"
+        outside.write_text("host-secret", encoding="utf-8")
+        (workspace.root / "outside-link.txt").symlink_to(outside)
         foreground = await registry.execute(
             "shell",
-            {"command": "echo hello", "description": "print a value"},
+            {
+                "command": "printf 'b\\na\\n' | sort > result.txt && cat result.txt",
+                "description": "run a pipeline",
+            },
             owner,
         )
         assert foreground.content["exit_code"] == 0
-        assert foreground.content["output"] == "hello\n"
+        assert foreground.content["output"] == "a\nb\n"
+        assert foreground.content["policy"]["risk"] == "write"
+        assert (workspace.root / "result.txt").read_text(encoding="utf-8") == "a\nb\n"
+
+        isolated = await registry.execute(
+            "shell",
+            {
+                "command": (
+                    "/bin/echo absolute-ok; "
+                    "test ! -e /mnt/d/WorkSpace/myProject/agent/Jasi/.env; "
+                    'test -z "$JASI_TEST_SECRET"; '
+                    "printf isolated"
+                ),
+                "description": "verify isolation",
+            },
+            owner,
+        )
+        assert isolated.content["exit_code"] == 0
+        assert isolated.content["output"] == "absolute-ok\nisolated"
+
+        escaped = await registry.execute(
+            "shell",
+            {"command": "cat outside-link.txt", "description": "test host isolation"},
+            owner,
+        )
+        assert escaped.content["exit_code"] != 0
+        assert "host-secret" not in escaped.content["output"]
+
+        network = await registry.execute(
+            "shell",
+            {
+                "command": (
+                    "python3 -c 'import socket; socket.create_connection((\"1.1.1.1\", 80), 1)'"
+                ),
+                "description": "test network isolation",
+                "timeout": 5,
+            },
+            owner,
+        )
+        assert network.content["exit_code"] != 0
 
         rejected_commands = (
-            "/bin/echo hello",
-            "cat ../outside.txt",
-            "echo hello | cat",
             "find . -exec echo {} +",
-            "find . -fprint0 output.txt",
-            "date -s tomorrow",
-            "sort -ooutput.txt",
-            "sort --compress-program=sh",
+            "find . -delete",
+            "git clean -fdx",
+            "sudo echo unsafe",
+            "bwrap --ro-bind / / true",
+            '"$COMMAND" --version',
         )
         for command in rejected_commands:
             with pytest.raises(ToolRejected):
@@ -172,6 +222,12 @@ async def test_shell_tools_reject_unsafe_commands_and_manage_owned_background_ta
             owner,
         )
         running_id = running.content["background_task_id"]
+        running_output = await registry.execute(
+            "task_output",
+            {"background_task_id": running_id},
+            owner,
+        )
+        assert running_output.content["status"] == "running"
         with pytest.raises(ToolRejected, match="was not found"):
             await registry.execute(
                 "task_output",
@@ -186,6 +242,59 @@ async def test_shell_tools_reject_unsafe_commands_and_manage_owned_background_ta
         assert stopped.content["status"] == "stopped"
     finally:
         await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shell_rewrites_deletion_to_workspace_trash(tmp_path: Path) -> None:
+    workspace = FileWorkspace(tmp_path / "workspace")
+    manager = CommandTaskManager(workspace)
+    if not manager.sandbox_available:
+        pytest.skip(manager.sandbox_unavailable_reason or "sandbox unavailable")
+    registry = ToolRegistry(create_shell_tools(workspace, manager))
+    victim = workspace.root / "victim.txt"
+    victim.write_text("recoverable", encoding="utf-8")
+    try:
+        outcome = await registry.execute(
+            "shell",
+            {"command": "rm -f victim.txt", "description": "remove a file"},
+            _context(),
+        )
+    finally:
+        await manager.aclose()
+
+    assert outcome.content["exit_code"] == 0
+    assert outcome.content["policy"]["risk"] == "destructive"
+    assert outcome.content["policy"]["rewrites"][0]["kind"] == "soft_delete"
+    assert not victim.exists()
+    trashed = list((workspace.root / ".jasi-trash").rglob("victim.txt"))
+    assert len(trashed) == 1
+    assert trashed[0].read_text(encoding="utf-8") == "recoverable"
+
+
+@pytest.mark.asyncio
+async def test_shell_bounds_foreground_output_while_reading(tmp_path: Path) -> None:
+    workspace = FileWorkspace(tmp_path / "workspace")
+    manager = CommandTaskManager(workspace)
+    if not manager.sandbox_available:
+        pytest.skip(manager.sandbox_unavailable_reason or "sandbox unavailable")
+    registry = ToolRegistry(create_shell_tools(workspace, manager), max_result_chars=100_000)
+    try:
+        outcome = await registry.execute(
+            "shell",
+            {
+                "command": 'python3 -c \'print("a" * 40000); print("z" * 40000)\'',
+                "description": "produce bounded output",
+            },
+            _context(),
+        )
+    finally:
+        await manager.aclose()
+
+    assert outcome.content["exit_code"] == 0
+    assert outcome.content["truncated"] is True
+    assert len(outcome.content["output"].encode()) < 31_000
+    assert outcome.content["output"].startswith("a" * 100)
+    assert outcome.content["output"].endswith("z" * 100 + "\n")
 
 
 @pytest.mark.asyncio
@@ -280,6 +389,37 @@ async def test_message_tools_only_return_visible_current_conversation_messages()
         await registry.execute("search_messages", {"query": "   "}, _context())
 
 
+@pytest.mark.asyncio
+async def test_process_tool_defaults_to_windows_and_filters_without_command_lines() -> None:
+    lookup = FakeProcessLookup(
+        {
+            "runtime": (ProcessRecord(1, "python", 2.0, 10_000_000),),
+            "windows": (
+                ProcessRecord(10, "Code", 5.5, 500_000_000),
+                ProcessRecord(11, "Code Helper", 1.0, 200_000_000),
+                ProcessRecord(12, "Explorer", 3.0, 300_000_000),
+            ),
+        }
+    )
+    registry = ToolRegistry(create_process_tools(lookup))
+
+    outcome = await registry.execute(
+        "list_processes",
+        {"scope": "auto", "name": "code", "sort_by": "memory"},
+        _context(),
+    )
+
+    assert lookup.calls == ["windows"]
+    assert outcome.content["scope"] == "windows"
+    assert [row["pid"] for row in outcome.content["processes"]] == [10, 11]
+    assert set(outcome.content["processes"][0]) == {
+        "pid",
+        "name",
+        "cpu_seconds",
+        "memory_mb",
+    }
+
+
 def test_builtin_builder_and_profiles_define_explicit_capability_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -289,6 +429,7 @@ def test_builtin_builder_and_profiles_define_explicit_capability_boundaries(
     registry = build_builtin_tool_registry(
         workspace=workspace,
         messages=repository,
+        processes=FakeProcessLookup(),
         command_tasks=manager,
     )
 

@@ -30,6 +30,7 @@ from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
 from jasi.adapters.persistence.postgres.schedule_repository import SQLAlchemyScheduleRepository
 from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourceRepository
 from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
+from jasi.adapters.system.processes import LocalProcessInspector
 from jasi.application.agent_work import AgentWorkHandler
 from jasi.application.context import TurnContextProvider
 from jasi.application.direct_work import DirectWorkHandler
@@ -55,6 +56,7 @@ from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import AgentRuntime
 from jasi.tools.builtin import build_builtin_tool_registry
 from jasi.tools.filesystem import FileWorkspace
+from jasi.tools.sandbox import BubblewrapSandbox
 from jasi.tools.shell import CommandTaskManager
 
 logger = logging.getLogger(__name__)
@@ -164,12 +166,22 @@ async def run() -> None:
             reconcile_seconds=settings.memory_reconcile_seconds,
         )
         file_workspace = FileWorkspace(Path(settings.tool_workspace))
-        command_tasks = CommandTaskManager(file_workspace)
+        command_sandbox = BubblewrapSandbox(
+            file_workspace,
+            allow_network=settings.shell_network_enabled,
+        )
+        command_tasks = CommandTaskManager(file_workspace, sandbox=command_sandbox)
+        if not command_tasks.sandbox_available:
+            logger.warning(
+                "sandboxed shell is unavailable: %s",
+                command_tasks.sandbox_unavailable_reason,
+            )
         if settings.web_allow_fake_ip_dns:
             logger.warning("web fake-IP DNS compatibility is enabled for 198.18.0.0/15")
         tools = build_builtin_tool_registry(
             workspace=file_workspace,
             messages=repository,
+            processes=LocalProcessInspector(),
             command_tasks=command_tasks,
             allow_fake_ip_dns=settings.web_allow_fake_ip_dns,
         )

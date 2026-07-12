@@ -7,6 +7,7 @@ import pytest
 from jasi.runtime.errors import ToolFailure, ToolRejected
 from jasi.tools.builtin import build_builtin_tool_registry
 from jasi.tools.registry import ToolExecutionContext, ToolRegistry, ToolSpec
+from tests.unit.fakes import FakeProcessLookup
 
 
 def context(
@@ -136,3 +137,17 @@ async def test_tool_search_inventory_reveals_every_authorized_hidden_tool() -> N
         "web_search",
         "write_file",
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_search_routes_computer_process_requests_to_read_only_tool() -> None:
+    registry = build_builtin_tool_registry(processes=FakeProcessLookup())
+    allowed = frozenset({"tool_search", "list_processes", "shell"})
+
+    outcome = await registry.execute(
+        "tool_search",
+        {"query": "查看我电脑上的进程"},
+        context(allowed=allowed, visible=frozenset({"tool_search"})),
+    )
+
+    assert outcome.reveal_tools == ("list_processes",)

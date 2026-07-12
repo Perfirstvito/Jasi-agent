@@ -36,6 +36,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
     from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
     from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourceRepository
     from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
+    from jasi.adapters.system.processes import LocalProcessInspector
     from jasi.application.agent_work import AgentWorkHandler
     from jasi.application.context import TurnContextProvider
     from jasi.application.outbox import OutboxDispatcher, OutboxWorker
@@ -261,7 +262,10 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
                     },
                 )
             ),
-            tools=build_builtin_tool_registry(messages=repository),
+            tools=build_builtin_tool_registry(
+                messages=repository,
+                processes=LocalProcessInspector(),
+            ),
             model_name="test-model",
             model_timeout_seconds=5,
             timezone="Asia/Shanghai",

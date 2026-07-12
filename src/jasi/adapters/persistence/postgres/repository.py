@@ -45,20 +45,59 @@ class SQLAlchemyRepository:
         async with self._session_factory() as session:
             filters = [
                 Message.conversation_id == conversation_id,
-                (
-                    (Message.role == "user")
-                    | (
-                        (Message.role == "assistant")
-                        & (Message.delivery_status == "sent")
-                        & (Message.origin != "system_error")
-                    )
-                ),
+                _message_is_visible(),
             ]
             if before_sequence is not None:
                 filters.append(Message.sequence < before_sequence)
             stmt = select(Message).where(*filters).order_by(Message.sequence.desc()).limit(limit)
             rows = list((await session.scalars(stmt)).all())
             return [_message_record(row) for row in reversed(rows)]
+
+    async def fetch_messages(
+        self,
+        conversation_id: int,
+        message_ids: tuple[int, ...],
+    ) -> list[MessageRecord]:
+        if not message_ids:
+            return []
+        async with self._session_factory() as session:
+            stmt = (
+                select(Message)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.id.in_(message_ids),
+                    _message_is_visible(),
+                )
+                .order_by(Message.sequence)
+            )
+            return [_message_record(row) for row in (await session.scalars(stmt)).all()]
+
+    async def search_messages(
+        self,
+        conversation_id: int,
+        query: str,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[MessageRecord], int]:
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        filters = (
+            Message.conversation_id == conversation_id,
+            _message_is_visible(),
+            Message.content.ilike(f"%{escaped}%", escape="\\"),
+        )
+        async with self._session_factory() as session:
+            total = int(
+                await session.scalar(select(func.count()).select_from(Message).where(*filters)) or 0
+            )
+            stmt = (
+                select(Message)
+                .where(*filters)
+                .order_by(Message.sequence.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            rows = list((await session.scalars(stmt)).all())
+            return [_message_record(row) for row in rows], total
 
     async def start_turn(
         self,
@@ -344,6 +383,14 @@ def _message_record(row: Message) -> MessageRecord:
         turn_id=row.turn_id,
         metadata=dict(row.meta or {}),
         created_at=row.created_at,
+    )
+
+
+def _message_is_visible():
+    return (Message.role == "user") | (
+        (Message.role == "assistant")
+        & (Message.delivery_status == "sent")
+        & (Message.origin != "system_error")
     )
 
 

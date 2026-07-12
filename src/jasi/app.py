@@ -54,6 +54,8 @@ from jasi.runtime.profile import (
 from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import AgentRuntime
 from jasi.tools.builtin import build_builtin_tool_registry
+from jasi.tools.filesystem import FileWorkspace
+from jasi.tools.shell import CommandTaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ async def run() -> None:
     configure_logging(settings.log_level)
     engine = create_engine(settings.database_url)
     memory_embedding: OpenAICompatibleEmbedding | None = None
+    command_tasks: CommandTaskManager | None = None
     try:
         await check_database_ready(engine)
 
@@ -160,7 +163,16 @@ async def run() -> None:
             lease_seconds=settings.memory_job_lease_seconds,
             reconcile_seconds=settings.memory_reconcile_seconds,
         )
-        tools = build_builtin_tool_registry()
+        file_workspace = FileWorkspace(Path(settings.tool_workspace))
+        command_tasks = CommandTaskManager(file_workspace)
+        if settings.web_allow_fake_ip_dns:
+            logger.warning("web fake-IP DNS compatibility is enabled for 198.18.0.0/15")
+        tools = build_builtin_tool_registry(
+            workspace=file_workspace,
+            messages=repository,
+            command_tasks=command_tasks,
+            allow_fake_ip_dns=settings.web_allow_fake_ip_dns,
+        )
         prompt_catalog = PromptCatalog.load(
             Path(settings.prompt_dir),
             {"passive", "proactive", "scheduled", "drift"},
@@ -292,6 +304,8 @@ async def run() -> None:
         logger.exception("jasi failed to start or run")
         raise SystemExit(str(exc)) from exc
     finally:
+        if command_tasks is not None:
+            await command_tasks.aclose()
         if memory_embedding is not None:
             await memory_embedding.aclose()
         await engine.dispose()

@@ -13,6 +13,7 @@ from jasi.ports.repository import (
 from jasi.ports.runtime import AgentRuntimePort
 from jasi.ports.schedule import ScheduleRepositoryPort
 from jasi.ports.source import InitiativeRepositoryPort, SourcePort, SourceRepositoryPort
+from jasi.ports.tools import MessageLookupPort
 from jasi.ports.work import WorkRepositoryPort
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "EffectRepositoryPort",
     "InboundHandler",
     "InitiativeRepositoryPort",
+    "MessageLookupPort",
     "ModelPort",
     "OutboundPolicy",
     "OutboxRepositoryPort",

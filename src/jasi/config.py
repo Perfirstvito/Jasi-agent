@@ -23,6 +23,8 @@ class Settings:
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
     prompt_dir: str = "prompts"
+    tool_workspace: str = "workspace/tools"
+    web_allow_fake_ip_dns: bool = False
     memory_scope_map: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     memory_root: str = "workspace/memory"
     light_model_timeout_seconds: float = 30.0
@@ -81,6 +83,17 @@ def _float(name: str, default: float) -> float:
         return float(raw)
     except ValueError as exc:
         raise SettingsError(f"{name} must be a number") from exc
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().casefold()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(f"{name} must be a boolean")
 
 
 def _allowed_user_ids() -> frozenset[int]:
@@ -188,6 +201,9 @@ def load_settings() -> Settings:
         telegram_bot_token=_required("JASI_TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_allowed_user_ids(),
         prompt_dir=os.environ.get("JASI_PROMPT_DIR", "prompts").strip() or "prompts",
+        tool_workspace=os.environ.get("JASI_TOOL_WORKSPACE", "workspace/tools").strip()
+        or "workspace/tools",
+        web_allow_fake_ip_dns=_bool("JASI_WEB_ALLOW_FAKE_IP_DNS", False),
         memory_scope_map=_memory_scope_map(),
         memory_root=os.environ.get("JASI_MEMORY_ROOT", "workspace/memory").strip()
         or "workspace/memory",

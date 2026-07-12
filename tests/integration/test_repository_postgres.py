@@ -125,6 +125,7 @@ async def test_passive_ingress_turn_recovery_and_ordered_outbox() -> None:
 
     from jasi.adapters.persistence.postgres.db import (
         InboundEvent,
+        Message,
         check_database_ready,
         create_engine,
         create_session_factory,
@@ -250,6 +251,20 @@ async def test_passive_ingress_turn_recovery_and_ordered_outbox() -> None:
             limit=30,
         )
         assert [row.role for row in before_delivery] == ["user"]
+        assert completion.message is not None
+        pending_search, pending_total = await repo.search_messages(
+            claim.conversation_id or 0,
+            "reply-one",
+            limit=10,
+            offset=0,
+        )
+        pending_fetch = await repo.fetch_messages(
+            claim.conversation_id or 0,
+            (completion.message.id,),
+        )
+        assert pending_search == []
+        assert pending_total == 0
+        assert pending_fetch == []
 
         first_claim, second_claim = await asyncio.gather(
             repo.claim_outbox_batch(10),
@@ -285,6 +300,46 @@ async def test_passive_ingress_turn_recovery_and_ordered_outbox() -> None:
             ("user", "hello"),
             ("assistant", "reply-one reply-two"),
         ]
+        sent_search, sent_total = await repo.search_messages(
+            claim.conversation_id or 0,
+            "reply-one",
+            limit=10,
+            offset=0,
+        )
+        sent_fetch = await repo.fetch_messages(
+            claim.conversation_id or 0,
+            (completion.message.id,),
+        )
+        assert [row.id for row in sent_search] == [completion.message.id]
+        assert sent_total == 1
+        assert [row.id for row in sent_fetch] == [completion.message.id]
+
+        async with session_factory.begin() as session:
+            hidden = Message(
+                conversation_id=claim.conversation_id or 0,
+                role="assistant",
+                origin="system_error",
+                sequence=10_000,
+                content="hidden system error",
+                delivery_status="sent",
+                meta={},
+            )
+            session.add(hidden)
+            await session.flush()
+            hidden_id = hidden.id
+        hidden_search, hidden_total = await repo.search_messages(
+            claim.conversation_id or 0,
+            "hidden system error",
+            limit=10,
+            offset=0,
+        )
+        hidden_fetch = await repo.fetch_messages(
+            claim.conversation_id or 0,
+            (hidden_id,),
+        )
+        assert hidden_search == []
+        assert hidden_total == 0
+        assert hidden_fetch == []
 
         rollback_inbound = InboundMessage(
             channel="telegram",

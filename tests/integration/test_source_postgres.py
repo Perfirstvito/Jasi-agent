@@ -261,7 +261,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
                     },
                 )
             ),
-            tools=build_builtin_tool_registry(),
+            tools=build_builtin_tool_registry(messages=repository),
             model_name="test-model",
             model_timeout_seconds=5,
             timezone="Asia/Shanghai",

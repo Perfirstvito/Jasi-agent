@@ -33,6 +33,21 @@ def test_embedding_is_explicitly_optional(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.light_model_base_url == settings.openai_base_url
     assert settings.light_model_api_key == settings.openai_api_key
     assert settings.light_model == settings.openai_model
+    assert settings.tool_workspace == "workspace/tools"
+    assert settings.web_allow_fake_ip_dns is False
+
+
+def test_fake_ip_dns_compatibility_requires_an_explicit_boolean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _base_environment(monkeypatch)
+    monkeypatch.setenv("JASI_WEB_ALLOW_FAKE_IP_DNS", "true")
+
+    assert load_settings().web_allow_fake_ip_dns is True
+
+    monkeypatch.setenv("JASI_WEB_ALLOW_FAKE_IP_DNS", "sometimes")
+    with pytest.raises(SettingsError, match="must be a boolean"):
+        load_settings()
 
 
 def test_embedding_and_light_model_use_independent_endpoints(

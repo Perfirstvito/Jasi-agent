@@ -31,6 +31,12 @@ from jasi.runtime.models import (
 )
 
 
+def _fake_message_is_visible(row: MessageRecord) -> bool:
+    return row.role == "user" or (
+        row.role == "assistant" and row.origin != "system_error" and row.delivery_status == "sent"
+    )
+
+
 class FakeModel:
     def __init__(self, responses: list[ModelResponse | Exception]) -> None:
         self.responses = responses
@@ -149,6 +155,38 @@ class FakeRepository:
             )
         ]
         return sorted(rows, key=lambda row: row.sequence)[-limit:]
+
+    async def fetch_messages(
+        self,
+        conversation_id: int,
+        message_ids: tuple[int, ...],
+    ) -> list[MessageRecord]:
+        selected = set(message_ids)
+        return [
+            row
+            for row in self.messages
+            if row.conversation_id == conversation_id
+            and row.id in selected
+            and _fake_message_is_visible(row)
+        ]
+
+    async def search_messages(
+        self,
+        conversation_id: int,
+        query: str,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[MessageRecord], int]:
+        term = query.casefold()
+        rows = [
+            row
+            for row in self.messages
+            if row.conversation_id == conversation_id
+            and term in row.content.casefold()
+            and _fake_message_is_visible(row)
+        ]
+        rows.sort(key=lambda row: row.sequence, reverse=True)
+        return rows[offset : offset + limit], len(rows)
 
     async def start_turn(
         self,

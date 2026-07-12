@@ -215,7 +215,8 @@ class ToolRegistry:
 def _search_score(tool: ToolSpec, query: str) -> int:
     name = tool.name.casefold()
     description = tool.description.casefold()
-    terms = " ".join(term.casefold() for term in tool.search_terms)
+    term_values = tuple(term.casefold() for term in tool.search_terms)
+    terms = " ".join(term_values)
     if query == name:
         return 100
 
@@ -225,6 +226,8 @@ def _search_score(tool: ToolSpec, query: str) -> int:
     if query in terms:
         score += 20
     if query in description:
+        score += 10
+    if any(term in query for term in term_values):
         score += 10
 
     tokens = {token for token in re.split(r"[\s_\-]+", query) if token}

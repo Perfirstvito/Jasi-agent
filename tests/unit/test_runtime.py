@@ -39,7 +39,7 @@ def make_runtime(
         repository=repo,
         context_provider=TurnContextProvider(repository=repo),
         prompt_assembler=PromptAssembler(catalog),
-        tools=tools or build_builtin_tool_registry(),
+        tools=tools or build_builtin_tool_registry(messages=repo),
         model_name="test-model",
         model_timeout_seconds=model_timeout_seconds,
         timezone="Asia/Shanghai",
@@ -134,7 +134,7 @@ async def test_runtime_selects_profile_without_changing_execution_flow() -> None
                 },
             )
         ),
-        tools=build_builtin_tool_registry(),
+        tools=build_builtin_tool_registry(messages=repo),
         model_name="test-model",
         model_timeout_seconds=5,
         timezone="Asia/Shanghai",
@@ -181,7 +181,7 @@ async def test_runtime_tool_call_then_final_reply() -> None:
 async def test_runtime_reveals_authorized_hidden_tool_on_next_model_step() -> None:
     repo = FakeRepository()
     calls: list[dict[str, Any]] = []
-    tools = build_builtin_tool_registry()
+    tools = build_builtin_tool_registry(messages=repo)
     tools.register(recording_tool("list_issues", calls))
     profile = replace(
         PASSIVE_PROFILE,
@@ -214,7 +214,7 @@ async def test_runtime_reveals_authorized_hidden_tool_on_next_model_step() -> No
 async def test_runtime_does_not_execute_newly_revealed_tool_in_same_batch() -> None:
     repo = FakeRepository()
     calls: list[dict[str, Any]] = []
-    tools = build_builtin_tool_registry()
+    tools = build_builtin_tool_registry(messages=repo)
     tools.register(recording_tool("list_issues", calls))
     profile = replace(
         PASSIVE_PROFILE,
@@ -244,7 +244,7 @@ async def test_runtime_does_not_execute_newly_revealed_tool_in_same_batch() -> N
 @pytest.mark.asyncio
 async def test_runtime_task_grant_only_narrows_profile_tools() -> None:
     repo = FakeRepository()
-    tools = build_builtin_tool_registry()
+    tools = build_builtin_tool_registry(messages=repo)
     tools.register(recording_tool("list_issues", []))
     tools.register(recording_tool("close_issue", []))
     profile = replace(
@@ -281,7 +281,8 @@ async def test_runtime_ignores_reveal_outside_authorized_scope() -> None:
     ) -> ToolOutcome:
         return ToolOutcome(content={"ok": True}, reveal_tools=("close_issue",))
 
-    tools = build_builtin_tool_registry()
+    repo = FakeRepository()
+    tools = build_builtin_tool_registry(messages=repo)
     tools.register(
         ToolSpec(
             name="reveal_unapproved",
@@ -310,7 +311,7 @@ async def test_runtime_ignores_reveal_outside_authorized_scope() -> None:
         ]
     )
 
-    await make_runtime(model, FakeRepository(), profile=profile, tools=tools).run(make_request())
+    await make_runtime(model, repo, profile=profile, tools=tools).run(make_request())
 
     assert "close_issue" not in {tool.name for tool in model.requests[1].tools}
 

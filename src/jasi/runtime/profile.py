@@ -8,6 +8,12 @@ from jasi.runtime.hooks import HookContext, HookSpec
 
 logger = logging.getLogger(__name__)
 
+_CORE_TOOLS = frozenset({"get_current_time", "tool_search"})
+_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+_FILE_READ_TOOLS = frozenset({"read_file", "list_dir"})
+_MESSAGE_TOOLS = frozenset({"search_messages", "fetch_messages"})
+_OPERATOR_TOOLS = frozenset({"write_file", "edit_file", "shell", "task_output", "task_stop"})
+
 
 @dataclass(frozen=True)
 class RuntimeProfile:
@@ -63,8 +69,8 @@ PASSIVE_PROFILE = RuntimeProfile(
     name="passive",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time", "tool_search"}),
-    base_tools=frozenset({"get_current_time", "tool_search"}),
+    allowed_tools=(_CORE_TOOLS | _WEB_TOOLS | _FILE_READ_TOOLS | _MESSAGE_TOOLS | _OPERATOR_TOOLS),
+    base_tools=_CORE_TOOLS,
     include_memory=True,
     hooks=_default_hooks("passive"),
 )
@@ -74,8 +80,8 @@ SCHEDULED_PROFILE = RuntimeProfile(
     name="scheduled",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time", "tool_search"}),
-    base_tools=frozenset({"get_current_time", "tool_search"}),
+    allowed_tools=_CORE_TOOLS | _WEB_TOOLS | _FILE_READ_TOOLS | _MESSAGE_TOOLS,
+    base_tools=_CORE_TOOLS,
     hooks=_default_hooks("scheduled"),
 )
 
@@ -84,8 +90,8 @@ PROACTIVE_PROFILE = RuntimeProfile(
     name="proactive",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time", "tool_search"}),
-    base_tools=frozenset({"get_current_time", "tool_search"}),
+    allowed_tools=_CORE_TOOLS | _WEB_TOOLS,
+    base_tools=_CORE_TOOLS,
     hooks=_default_hooks("proactive"),
 )
 
@@ -94,7 +100,7 @@ DRIFT_PROFILE = RuntimeProfile(
     name="drift",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time", "tool_search"}),
-    base_tools=frozenset({"get_current_time", "tool_search"}),
+    allowed_tools=_CORE_TOOLS | _WEB_TOOLS | _MESSAGE_TOOLS,
+    base_tools=_CORE_TOOLS,
     hooks=_default_hooks("drift"),
 )

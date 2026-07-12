@@ -102,3 +102,17 @@ async def test_tool_search_only_reveals_authorized_hidden_tools() -> None:
 
     assert outcome.reveal_tools == ("list_issues",)
     assert [item["name"] for item in outcome.content["matched"]] == ["list_issues"]
+
+
+@pytest.mark.asyncio
+async def test_tool_search_matches_chinese_alias_inside_a_natural_phrase() -> None:
+    registry = build_builtin_tool_registry()
+    allowed = frozenset({"tool_search", "shell"})
+
+    outcome = await registry.execute(
+        "tool_search",
+        {"query": "帮我运行一个命令"},
+        context(allowed=allowed, visible=frozenset({"tool_search"})),
+    )
+
+    assert outcome.reveal_tools == ("shell",)

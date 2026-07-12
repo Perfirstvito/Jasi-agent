@@ -14,6 +14,7 @@ from jasi.domain.memory import (
     MemoryRetrievalAudit,
     MemoryScopeRecord,
     MemorySearchHit,
+    MemoryTier,
     MemoryWorkspaceSnapshot,
 )
 
@@ -64,6 +65,7 @@ class MemoryIndexRepositoryPort(Protocol):
         query_text: str,
         query_embedding: tuple[float, ...] | None,
         limit: int,
+        tiers: frozenset[MemoryTier] | None = None,
     ) -> list[MemorySearchHit]: ...
 
     async def record_retrieval(self, audit: MemoryRetrievalAudit) -> None: ...

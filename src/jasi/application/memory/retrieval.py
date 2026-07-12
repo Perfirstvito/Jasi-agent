@@ -11,6 +11,7 @@ from jasi.ports.memory import MemoryDocumentStorePort, MemoryIndexRepositoryPort
 from jasi.ports.memory_reasoning import MemoryRetrievalReasonerPort
 
 logger = logging.getLogger(__name__)
+_RECALLED_TIERS = frozenset({"episodic"})
 
 
 class MemoryContextService:
@@ -176,12 +177,14 @@ class MemoryContextService:
                 query_text=rewritten,
                 query_embedding=rewritten_vector,
                 limit=self._search_limit,
+                tiers=_RECALLED_TIERS,
             ),
             self._repository.search_records(
                 scope_id=scope_id,
                 query_text=query_text,
                 query_embedding=None,
                 limit=self._search_limit,
+                tiers=_RECALLED_TIERS,
             ),
         ]
         if hyde_vector is not None and hyde_text is not None:
@@ -191,6 +194,7 @@ class MemoryContextService:
                     query_text=hyde_text,
                     query_embedding=hyde_vector,
                     limit=self._search_limit,
+                    tiers=_RECALLED_TIERS,
                 )
             )
         try:

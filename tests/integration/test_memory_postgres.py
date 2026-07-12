@@ -231,6 +231,16 @@ async def test_memory_scope_index_evidence_search_and_retrieval_audit(tmp_path: 
         assert hits[0].semantic_score > 0.99
         assert (
             await repository.search_records(
+                scope_id=telegram_scope.id,
+                query_text="PostgreSQL database preference",
+                query_embedding=first_embedding,
+                limit=5,
+                tiers=frozenset({"episodic"}),
+            )
+            == []
+        )
+        assert (
+            await repository.search_records(
                 scope_id=isolated_scope.id,
                 query_text="PostgreSQL",
                 query_embedding=first_embedding,

@@ -443,6 +443,7 @@ async def test_memory_context_uses_audited_lexical_pipeline_without_embeddings(
     assert [item.kind for item in context] == ["episodic_memory"]
     assert len(repository.searches) == 2
     assert all(search["query_embedding"] is None for search in repository.searches)
+    assert all(search["tiers"] == frozenset({"episodic"}) for search in repository.searches)
     assert repository.audit.hyde_text is None
     assert repository.audit.trace["retrieval_mode"] == "lexical"
     assert repository.audit.hits[0].injected is True

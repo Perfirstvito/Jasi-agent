@@ -32,6 +32,7 @@ from jasi.domain.memory import (
     MemoryRetrievalAudit,
     MemoryScopeRecord,
     MemorySearchHit,
+    MemoryTier,
 )
 
 MEMORY_JOB_BACKOFF_SECONDS = (2, 10, 30, 120, 300)
@@ -153,8 +154,11 @@ class SQLAlchemyMemoryRepository:
         query_text: str,
         query_embedding: tuple[float, ...] | None,
         limit: int,
+        tiers: frozenset[MemoryTier] | None = None,
     ) -> list[MemorySearchHit]:
         if limit <= 0 or not query_text.strip():
+            return []
+        if tiers is not None and not tiers:
             return []
         if query_embedding is not None and len(query_embedding) != EMBEDDING_DIMENSIONS:
             raise ValueError(
@@ -172,13 +176,17 @@ class SQLAlchemyMemoryRepository:
             score = (semantic * 0.75 + lexical * 0.25).label("final_score")
             columns = (MemoryRecord, semantic, lexical, score)
 
+        filters = [
+            MemoryRecord.scope_id == scope_id,
+            MemoryRecord.status == "active",
+        ]
+        if tiers is not None:
+            filters.append(MemoryRecord.tier.in_(tiers))
+
         async with self._session_factory() as session:
             statement = (
                 select(*columns)
-                .where(
-                    MemoryRecord.scope_id == scope_id,
-                    MemoryRecord.status == "active",
-                )
+                .where(*filters)
                 .order_by(score.desc(), MemoryRecord.id)
                 .limit(limit)
             )

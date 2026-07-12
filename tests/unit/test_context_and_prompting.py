@@ -90,6 +90,7 @@ def test_prompt_assembler_keeps_self_profile_context_and_history_separate() -> N
     assert [message.role for message in messages] == ["system", "user", "assistant", "user"]
     assert "Fixed identity" in (messages[0].content or "")
     assert "Reply to the current message" in (messages[0].content or "")
+    assert "partial authorized catalog" in (messages[0].content or "")
     assert "reference-only" in (messages[1].content or "")
     assert messages[-1].content == "hello"
 

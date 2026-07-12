@@ -323,7 +323,15 @@ def create_shell_tools(
             },
             risk="external-side-effect",
             handler=shell,
-            search_terms=("run command", "terminal", "shell", "命令", "终端"),
+            search_terms=(
+                "run command",
+                "terminal",
+                "shell",
+                "命令",
+                "终端",
+                "运行命令",
+                "执行命令",
+            ),
         ),
         ToolSpec(
             name="task_output",

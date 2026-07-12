@@ -96,6 +96,10 @@ not contain Channel, MCP, Skill, or persistence logic.
 visible sets through `ToolExecutionContext`, searches only `authorized - visible`, and returns a
 normal `ToolOutcome` with optional `reveal_tools`.
 
+The discovery schema explicitly warns that visible tools are a partial catalog. Query `*` is the
+inventory operation: it returns and reveals every authorized hidden tool, allowing capability
+questions to be answered accurately without making every schema permanently visible.
+
 Runtime does not inspect the tool name or parse tool-specific JSON. It executes a complete model
 tool-call batch against the visibility snapshot used for that model request, records every
 result, and applies successful reveal requests after the batch. A model therefore cannot search

@@ -5,17 +5,36 @@ from typing import Any
 from jasi.runtime.errors import ToolRejected
 from jasi.tools.registry import ToolExecutionContext, ToolOutcome, ToolRegistry, ToolSpec
 
+_INVENTORY_QUERIES = frozenset(
+    {
+        "*",
+        "all",
+        "all tools",
+        "available tools",
+        "全部",
+        "全部工具",
+        "所有工具",
+        "工具列表",
+        "有哪些工具",
+    }
+)
+
 
 def create_tool_search_tool(registry: ToolRegistry) -> ToolSpec:
     def search_tools(arguments: dict[str, Any], context: ToolExecutionContext) -> ToolOutcome:
         query = str(arguments["query"]).strip()
         if not query:
             raise ToolRejected("tool search query cannot be empty")
-        limit = int(arguments.get("limit", 5))
+        inventory = query.casefold() in _INVENTORY_QUERIES
+        limit = int(arguments.get("limit", 20 if inventory else 5))
         candidates = context.allowed_tools - context.visible_tools
-        matches = registry.search(query, candidates=candidates, limit=limit)
+        if inventory:
+            matches = [registry.get(name) for name in sorted(candidates)[:limit]]
+        else:
+            matches = registry.search(query, candidates=candidates, limit=limit)
         names = tuple(tool.name for tool in matches)
         content: dict[str, Any] = {
+            "inventory": inventory,
             "matched": [
                 {
                     "name": tool.name,
@@ -41,9 +60,10 @@ def create_tool_search_tool(registry: ToolRegistry) -> ToolSpec:
     return ToolSpec(
         name="tool_search",
         description=(
-            "Find additional tools that are already authorized for this task. "
-            "Use it when the currently visible tools cannot complete the request. "
-            "Matched tools become available on the next model step."
+            "Discover additional tools already authorized for this task. The currently visible "
+            "schemas are only a partial catalog: call this before saying a capability is "
+            "unavailable. When asked to list tools or capabilities, call with query='*' to load "
+            "the full authorized hidden catalog. Matches become available on the next model step."
         ),
         parameters={
             "type": "object",
@@ -51,13 +71,15 @@ def create_tool_search_tool(registry: ToolRegistry) -> ToolSpec:
                 "query": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "A short description of the capability needed.",
+                    "description": (
+                        "A short description of the capability needed, or '*' to list all "
+                        "authorized hidden tools."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 5,
-                    "default": 5,
+                    "maximum": 20,
                 },
             },
             "required": ["query"],

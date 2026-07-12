@@ -99,7 +99,14 @@ def create_filesystem_tools(workspace: FileWorkspace) -> list[ToolSpec]:
             },
             risk="read-only",
             handler=read_file,
-            search_terms=("read file", "file content", "读取文件", "查看文件"),
+            search_terms=(
+                "read file",
+                "file content",
+                "读取文件",
+                "查看文件",
+                "打开文件",
+                "文件内容",
+            ),
         ),
         ToolSpec(
             name="list_dir",
@@ -113,7 +120,7 @@ def create_filesystem_tools(workspace: FileWorkspace) -> list[ToolSpec]:
             },
             risk="read-only",
             handler=list_dir,
-            search_terms=("list directory", "files", "目录", "文件列表"),
+            search_terms=("list directory", "files", "目录", "文件列表", "查看目录"),
         ),
         ToolSpec(
             name="write_file",
@@ -132,7 +139,7 @@ def create_filesystem_tools(workspace: FileWorkspace) -> list[ToolSpec]:
             },
             risk="write",
             handler=write_file,
-            search_terms=("write file", "create file", "写文件", "创建文件"),
+            search_terms=("write file", "create file", "写文件", "创建文件", "保存文件"),
         ),
         ToolSpec(
             name="edit_file",
@@ -153,7 +160,7 @@ def create_filesystem_tools(workspace: FileWorkspace) -> list[ToolSpec]:
             },
             risk="write",
             handler=edit_file,
-            search_terms=("edit file", "replace text", "修改文件", "替换文本"),
+            search_terms=("edit file", "replace text", "修改文件", "替换文本", "编辑文件"),
         ),
     ]
 

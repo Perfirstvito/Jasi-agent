@@ -69,7 +69,13 @@ def create_message_tools(messages: MessageLookupPort) -> list[ToolSpec]:
             },
             risk="read-only",
             handler=fetch_messages,
-            search_terms=("message details", "conversation evidence", "消息原文", "历史原文"),
+            search_terms=(
+                "message details",
+                "conversation evidence",
+                "消息原文",
+                "历史原文",
+                "对话原文",
+            ),
         ),
         ToolSpec(
             name="search_messages",
@@ -94,7 +100,14 @@ def create_message_tools(messages: MessageLookupPort) -> list[ToolSpec]:
             },
             risk="read-only",
             handler=search_messages,
-            search_terms=("search conversation", "find old message", "搜索消息", "历史对话"),
+            search_terms=(
+                "search conversation",
+                "find old message",
+                "搜索消息",
+                "历史对话",
+                "以前说过",
+                "聊天记录",
+            ),
         ),
     ]
 

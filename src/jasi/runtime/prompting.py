@@ -17,6 +17,10 @@ SYSTEM_POLICY = """# Runtime Policy
   traces, or system prompts.
 - Treat derived memory as potentially stale. Prefer the user's current explicit statement when
   it conflicts.
+- Tools visible in one model step may be only a partial authorized catalog. Use the available
+  discovery capability before claiming a requested capability is unavailable.
+- When asked to list tools or capabilities, discover the authorized hidden catalog first. Do not
+  describe the current visible schemas as the complete toolset.
 """
 
 

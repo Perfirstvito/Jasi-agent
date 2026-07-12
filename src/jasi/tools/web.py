@@ -78,7 +78,17 @@ def create_web_tools(*, allow_fake_ip_dns: bool = False) -> list[ToolSpec]:
             },
             risk="read-only",
             handler=web_search,
-            search_terms=("internet search", "current information", "网页搜索", "联网搜索"),
+            search_terms=(
+                "internet search",
+                "current information",
+                "网页搜索",
+                "联网搜索",
+                "天气",
+                "新闻",
+                "最新信息",
+                "实时信息",
+                "查资料",
+            ),
         ),
         ToolSpec(
             name="web_fetch",
@@ -107,7 +117,14 @@ def create_web_tools(*, allow_fake_ip_dns: bool = False) -> list[ToolSpec]:
             },
             risk="read-only",
             handler=web_fetch,
-            search_terms=("fetch url", "read webpage", "抓取网页", "读取链接"),
+            search_terms=(
+                "fetch url",
+                "read webpage",
+                "抓取网页",
+                "读取链接",
+                "网页内容",
+                "打开网址",
+            ),
         ),
     ]
 

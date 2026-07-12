@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from pathlib import Path
 
 from jasi.adapters.channels.telegram import (
     TelegramBotClient,
@@ -24,6 +25,7 @@ from jasi.adapters.persistence.postgres.schedule_repository import SQLAlchemySch
 from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourceRepository
 from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
 from jasi.application.agent_work import AgentWorkHandler
+from jasi.application.context import TurnContextProvider
 from jasi.application.direct_work import DirectWorkHandler
 from jasi.application.effect import EffectDispatcher, EffectWorker
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
@@ -39,6 +41,7 @@ from jasi.runtime.profile import (
     PROACTIVE_PROFILE,
     SCHEDULED_PROFILE,
 )
+from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -85,6 +88,10 @@ async def run() -> None:
             timeout_seconds=settings.model_timeout_seconds,
         )
         tools = ToolRegistry([get_current_time_tool])
+        prompt_catalog = PromptCatalog.load(
+            Path(settings.prompt_dir),
+            {"passive", "proactive", "scheduled", "drift"},
+        )
         runtime = AgentRuntime(
             profiles={
                 PASSIVE_PROFILE.name: PASSIVE_PROFILE,
@@ -94,6 +101,8 @@ async def run() -> None:
             },
             model=model,
             repository=repository,
+            context_provider=TurnContextProvider(repository=repository),
+            prompt_assembler=PromptAssembler(prompt_catalog),
             tools=tools,
             model_name=settings.openai_model,
             model_timeout_seconds=settings.model_timeout_seconds,

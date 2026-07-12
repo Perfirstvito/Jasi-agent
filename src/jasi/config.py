@@ -16,6 +16,7 @@ class Settings:
     openai_model: str
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
+    prompt_dir: str = "prompts"
     timezone: str = "Asia/Shanghai"
     model_timeout_seconds: float = 60.0
     telegram_poll_timeout_seconds: int = 30
@@ -84,6 +85,7 @@ def load_settings() -> Settings:
         openai_model=_required("JASI_OPENAI_MODEL"),
         telegram_bot_token=_required("JASI_TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_allowed_user_ids(),
+        prompt_dir=os.environ.get("JASI_PROMPT_DIR", "prompts").strip() or "prompts",
         timezone=os.environ.get("JASI_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
         model_timeout_seconds=_float("JASI_MODEL_TIMEOUT_SECONDS", 60.0),
         telegram_poll_timeout_seconds=_int("JASI_TELEGRAM_POLL_TIMEOUT_SECONDS", 30),

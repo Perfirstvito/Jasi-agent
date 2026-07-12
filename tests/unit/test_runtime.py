@@ -5,10 +5,12 @@ from dataclasses import replace
 
 import pytest
 
+from jasi.application.context import TurnContextProvider
 from jasi.ports.model import ModelPort
 from jasi.runtime.hooks import HookSpec
 from jasi.runtime.models import ModelResponse, ToolCall, TurnRequest
 from jasi.runtime.profile import PASSIVE_PROFILE, SCHEDULED_PROFILE
+from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import FIXED_ERROR_REPLY, AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -21,10 +23,19 @@ def make_runtime(
     profile=PASSIVE_PROFILE,
     model_timeout_seconds: float = 5,
 ) -> AgentRuntime:
+    catalog = PromptCatalog(
+        persona="You are Jasi.",
+        profiles={
+            "passive": "Handle a passive conversation.",
+            "scheduled": "Execute a scheduled instruction.",
+        },
+    )
     return AgentRuntime(
         profiles={profile.name: profile},
         model=model,
         repository=repo,
+        context_provider=TurnContextProvider(repository=repo),
+        prompt_assembler=PromptAssembler(catalog),
         tools=ToolRegistry([get_current_time_tool]),
         model_name="test-model",
         model_timeout_seconds=model_timeout_seconds,
@@ -91,6 +102,16 @@ async def test_runtime_selects_profile_without_changing_execution_flow() -> None
         },
         model=model,
         repository=repo,
+        context_provider=TurnContextProvider(repository=repo),
+        prompt_assembler=PromptAssembler(
+            PromptCatalog(
+                persona="You are Jasi.",
+                profiles={
+                    "passive": "Handle a passive conversation.",
+                    "scheduled": "Execute a scheduled instruction.",
+                },
+            )
+        ),
         tools=ToolRegistry([get_current_time_tool]),
         model_name="test-model",
         model_timeout_seconds=5,

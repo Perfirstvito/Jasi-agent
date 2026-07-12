@@ -38,6 +38,7 @@ async def test_drift_idle_gate_passive_cancellation_runtime_and_outbox() -> None
     from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
     from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
     from jasi.application.agent_work import AgentWorkHandler
+    from jasi.application.context import TurnContextProvider
     from jasi.application.outbox import OutboxDispatcher, OutboxWorker
     from jasi.application.work import WorkFinalizer
     from jasi.domain.drift import DriftOpportunitySpec
@@ -45,6 +46,7 @@ async def test_drift_idle_gate_passive_cancellation_runtime_and_outbox() -> None
     from jasi.domain.work import WorkExecutionResult
     from jasi.runtime.models import ModelResponse
     from jasi.runtime.profile import DRIFT_PROFILE
+    from jasi.runtime.prompting import PromptAssembler, PromptCatalog
     from jasi.runtime.runtime import AgentRuntime
     from jasi.tools.registry import ToolRegistry
     from jasi.tools.time import get_current_time_tool
@@ -175,9 +177,7 @@ async def test_drift_idle_gate_passive_cancellation_runtime_and_outbox() -> None
             initiatives.materialize_initiatives("drift", datetime.now(UTC), 100),
             initiatives.materialize_initiatives("drift", datetime.now(UTC), 100),
         )
-        run_planned = [
-            row for row in [*planned_a, *planned_b] if row.session_id == run_session
-        ]
+        run_planned = [row for row in [*planned_a, *planned_b] if row.session_id == run_session]
         assert len(run_planned) == 1
         run_work = run_planned[0]
         assert run_work.kind == "drift"
@@ -199,6 +199,13 @@ async def test_drift_idle_gate_passive_cancellation_runtime_and_outbox() -> None
             profiles={DRIFT_PROFILE.name: DRIFT_PROFILE},
             model=model,
             repository=repository,
+            context_provider=TurnContextProvider(repository=repository),
+            prompt_assembler=PromptAssembler(
+                PromptCatalog(
+                    persona="You are Jasi.",
+                    profiles={"drift": "Handle drift context."},
+                )
+            ),
             tools=ToolRegistry([get_current_time_tool]),
             model_name="test-model",
             model_timeout_seconds=5,
@@ -228,9 +235,7 @@ async def test_drift_idle_gate_passive_cancellation_runtime_and_outbox() -> None
             pass
 
         model_inputs = [
-            message.content
-            for message in model.requests[0].messages
-            if message.role == "user"
+            message.content for message in model.requests[0].messages if message.role == "user"
         ]
         assert model_inputs == ["Ask how the user's side project is going"]
         assert any(

@@ -7,7 +7,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from jasi.domain.models import MessageRecord
+from jasi.domain.context import TurnContextQuery
+from jasi.ports.context import TurnContextProviderPort
 from jasi.ports.model import ModelPort
 from jasi.ports.repository import RuntimeRepositoryPort
 from jasi.runtime.errors import (
@@ -32,6 +33,7 @@ from jasi.runtime.models import (
     Usage,
 )
 from jasi.runtime.profile import RuntimeProfile
+from jasi.runtime.prompting import PromptAssembler
 from jasi.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,8 @@ class AgentRuntime:
         profiles: Mapping[str, RuntimeProfile],
         model: ModelPort,
         repository: RuntimeRepositoryPort,
+        context_provider: TurnContextProviderPort,
+        prompt_assembler: PromptAssembler,
         tools: ToolRegistry,
         model_name: str,
         model_timeout_seconds: float,
@@ -58,13 +62,13 @@ class AgentRuntime:
             raise ValueError("runtime profile keys must match profile names")
         self._model = model
         self._repository = repository
+        self._context_provider = context_provider
+        self._prompt_assembler = prompt_assembler
         self._tools = tools
         self._model_name = model_name
         self._model_timeout_seconds = model_timeout_seconds
         self._timezone = timezone
-        self._hooks = {
-            name: HookManager(profile.hooks) for name, profile in self._profiles.items()
-        }
+        self._hooks = {name: HookManager(profile.hooks) for name, profile in self._profiles.items()}
 
     async def run(self, request: TurnRequest) -> TurnResult:
         try:
@@ -94,12 +98,22 @@ class AgentRuntime:
         steps = 0
 
         try:
-            history = await self._repository.load_history(
-                conversation_id=request.conversation_id,
-                before_sequence=request.history_before_sequence,
-                limit=profile.history_limit,
+            context = await self._context_provider.prepare(
+                TurnContextQuery(
+                    conversation_id=request.conversation_id,
+                    before_sequence=request.history_before_sequence,
+                    input_text=request.input_text,
+                    profile=request.profile,
+                    history_limit=profile.history_limit,
+                    turn_id=turn_id,
+                    include_memory=profile.include_memory,
+                )
             )
-            messages = self._build_messages(profile, history, request.input_text)
+            messages = self._prompt_assembler.build(
+                profile_name=profile.name,
+                context=context,
+                input_text=request.input_text,
+            )
             tools = self._tools.definitions(profile.allowed_tools)
 
             while steps < profile.max_model_steps:
@@ -196,21 +210,6 @@ class AgentRuntime:
                 error_message=str(exc)[:500],
             )
             return await self._commit_result(request, hooks, result, steps)
-
-    def _build_messages(
-        self,
-        profile: RuntimeProfile,
-        history: list[MessageRecord],
-        input_text: str,
-    ) -> list[ModelMessage]:
-        messages = [ModelMessage(role="system", content=profile.system_prompt)]
-        for item in history:
-            if item.role == "user":
-                messages.append(ModelMessage(role="user", content=item.content))
-            elif item.role == "assistant":
-                messages.append(ModelMessage(role="assistant", content=item.content))
-        messages.append(ModelMessage(role="user", content=input_text))
-        return messages
 
     async def _execute_tool(
         self,

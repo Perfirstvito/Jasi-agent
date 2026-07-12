@@ -1,4 +1,5 @@
 from jasi.ports.channel import ChannelPort, InboundHandler, OutboundPolicy
+from jasi.ports.context import TurnContextProviderPort
 from jasi.ports.drift import DriftRepositoryPort
 from jasi.ports.effect import EffectPort, EffectRepositoryPort
 from jasi.ports.model import ModelPort
@@ -32,5 +33,6 @@ __all__ = [
     "ScheduleRepositoryPort",
     "SourcePort",
     "SourceRepositoryPort",
+    "TurnContextProviderPort",
     "WorkRepositoryPort",
 ]

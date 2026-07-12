@@ -1,3 +1,4 @@
+from jasi.domain.context import ContextItem, HistoryItem, TurnContextQuery, TurnContextSnapshot
 from jasi.domain.drift import DriftOfferResult, DriftOpportunityRecord, DriftOpportunitySpec
 from jasi.domain.effect import EffectDraft, EffectRecord, EffectResult
 from jasi.domain.models import (
@@ -33,6 +34,7 @@ from jasi.domain.work import (
 )
 
 __all__ = [
+    "ContextItem",
     "ConversationRecord",
     "DeliveryResult",
     "DriftOfferResult",
@@ -41,6 +43,7 @@ __all__ = [
     "EffectDraft",
     "EffectRecord",
     "EffectResult",
+    "HistoryItem",
     "InboundMessage",
     "MessageRecord",
     "OutboundMessage",
@@ -55,6 +58,8 @@ __all__ = [
     "SourceItemDraft",
     "SourceSubscriptionRecord",
     "SourceSubscriptionSpec",
+    "TurnContextQuery",
+    "TurnContextSnapshot",
     "WorkCompletion",
     "WorkEnqueueResult",
     "WorkExecutionResult",

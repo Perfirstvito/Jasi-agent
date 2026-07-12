@@ -37,6 +37,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
     from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourceRepository
     from jasi.adapters.persistence.postgres.work_repository import SQLAlchemyWorkRepository
     from jasi.application.agent_work import AgentWorkHandler
+    from jasi.application.context import TurnContextProvider
     from jasi.application.outbox import OutboxDispatcher, OutboxWorker
     from jasi.application.work import WorkFinalizer
     from jasi.domain.models import InboundMessage
@@ -49,6 +50,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
     from jasi.domain.work import WorkExecutionResult
     from jasi.runtime.models import ModelResponse
     from jasi.runtime.profile import PASSIVE_PROFILE, PROACTIVE_PROFILE
+    from jasi.runtime.prompting import PromptAssembler, PromptCatalog
     from jasi.runtime.runtime import AgentRuntime
     from jasi.tools.registry import ToolRegistry
     from jasi.tools.time import get_current_time_tool
@@ -250,6 +252,16 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
             },
             model=model,
             repository=repository,
+            context_provider=TurnContextProvider(repository=repository),
+            prompt_assembler=PromptAssembler(
+                PromptCatalog(
+                    persona="You are Jasi.",
+                    profiles={
+                        "passive": "Handle passive context.",
+                        "proactive": "Handle proactive context.",
+                    },
+                )
+            ),
             tools=ToolRegistry([get_current_time_tool]),
             model_name="test-model",
             model_timeout_seconds=5,
@@ -279,9 +291,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
             pass
 
         user_prompts = [
-            message.content
-            for message in model.requests[0].messages
-            if message.role == "user"
+            message.content for message in model.requests[0].messages if message.role == "user"
         ]
         assert user_prompts == ["hello before the update", "source item A"]
         assert any(message.text == "A relevant update" for message in channel.sent)

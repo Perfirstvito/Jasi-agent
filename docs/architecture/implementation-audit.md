@@ -33,9 +33,10 @@ ToolExecution。它不导入 Trigger、Telegram、Outbox、Schedule、Source、D
 | Phase 4 | SourcePort、持久化 cursor/items、proactive cooldown planner |
 | Phase 5 | DriftOpportunity、idle/cooldown gate、共享 InitiativePlanner/Runtime |
 | Phase 6 | Work heartbeat、后台配额、Effect Outbox、运维聚合查询 |
+| Phase 7 | 静态 Persona/Profile、不可变上下文快照、Markdown 权威 passive memory 与可重建检索索引 |
 
-Prompt 抽象仍按原决定延后。现在已有 passive/scheduled/proactive/drift 四个真实 Profile，但它们的
-差异仍能由 `RuntimeProfile` 直接表达；尚没有足够证据证明需要额外 Prompt DSL 或依赖图。
+Prompt 采用静态 `persona.md` 和四个 Profile Markdown，由 `PromptAssembler` 显式组装。Memory 只作为
+`TurnContextSnapshot` 中的 derived reference data 进入模型；仍不引入 Prompt DSL、动态插件或依赖图。
 
 ## 不变量证据
 
@@ -93,6 +94,17 @@ Work/Outbox 并发领取不重复。
 Source 通过显式 `SourcePort` registry 注册，Channel 通过 OutboxDispatcher registry 注册。Runtime
 只按 request.profile 从 Profile mapping 选择配置；新增 scheduled/proactive/drift 未增加模型循环分支。
 
+### 11. Markdown 是唯一 Memory 内容事实源
+
+`MemoryConsolidator` 只修改 Markdown 的受管区段；人工区段保留。PostgreSQL 只保存可重建记录、向量、
+证据、检索审计、job 和 checkpoint，不提供 DB -> Markdown 回写。人工编辑由 `MemoryWorker` 检测 hash
+变化后重建索引。Memory 根目录必须使用持久化存储。
+
+### 12. Proactive 不直接写长期记忆
+
+只有成功送达的 passive model reply 会创建 consolidation job。已送达 proactive assistant 可在用户后来
+回复形成的 passive 窗口中提供上下文，但不能单独作为用户事实证据；没有后续互动时不会污染长期记忆。
+
 ## 竞态处理
 
 | 竞态 | 当前处理 |
@@ -107,6 +119,9 @@ Source 通过显式 `SourcePort` registry 注册，Channel 通过 OutboxDispatch
 | 两个 initiative planner 选同候选 | candidate row lock + session rank + initiative state row lock |
 | source 标记完成但 ACK 尚未执行 | ACK 先持久化 Effect Outbox，Worker 后执行 |
 | 第一分段失败、后续分段先发送 | Outbox 只领取所有前序分段已 sent 的记录；终止失败取消后续分段 |
+| Memory 文件写入后、checkpoint 前崩溃 | lease 到期后重跑；稳定记录合并与 episodic key append 幂等 |
+| 人工编辑 Markdown 与 worker 同时写 | expected hash 冲突使 job 重试，不覆盖人工新内容 |
+| 两个 Memory worker 领取同一 scope | scope 行锁 + lease token；同一 scope 串行、不同 scope 可并发 |
 
 ## 明确语义与剩余边界
 
@@ -117,3 +132,5 @@ Source 通过显式 `SourcePort` registry 注册，Channel 通过 OutboxDispatch
 - 项目提供 SourcePort、EffectPort 和 DriftOpportunityProducer 边界，但默认不注册具体外部 connector。
 - Schedule 创建当前通过 `ScheduleService`，尚未暴露 Telegram 命令或模型工具。
 - 首版仍是单应用进程；数据库约束、lease 和 SKIP LOCKED 已允许未来多 worker，但没有分布式限流服务。
+- Memory 的四个 Markdown 文件不是数据库备份的投影；文件系统丢失后不能从 PostgreSQL 反向恢复。
+- Embedding 未配置时使用 trigram lexical recall；配置兼容 endpoint 后启用 pgvector + HyDE 混合检索。

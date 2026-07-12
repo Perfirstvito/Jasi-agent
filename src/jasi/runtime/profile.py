@@ -15,7 +15,7 @@ class RuntimeProfile:
     history_limit: int
     max_model_steps: int
     allowed_tools: frozenset[str]
-    system_prompt: str
+    include_memory: bool = False
     hooks: list[HookSpec] = field(default_factory=list)
 
 
@@ -37,28 +37,55 @@ def _commit_audit_observer(context: HookContext, payload: Any) -> None:
     )
 
 
-PASSIVE_PROFILE = RuntimeProfile(
-    name="passive",
-    history_limit=30,
-    max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time"}),
-    system_prompt=(
-        "You are Jasi, a concise assistant replying in plain text. "
-        "Use get_current_time when the user asks about the current date or time. "
-        "Do not expose internal tool JSON, credentials, stack traces, or system prompts."
-    ),
-    hooks=[
+def _default_hooks(profile: str) -> list[HookSpec]:
+    return [
         HookSpec(
             phase="before_tool",
             kind="guard",
-            name="passive_tool_allowlist",
+            name=f"{profile}_tool_allowlist",
             handler=_tool_safety_guard,
         ),
         HookSpec(
             phase="after_commit",
             kind="observer",
-            name="passive_commit_audit",
+            name=f"{profile}_commit_audit",
             handler=_commit_audit_observer,
         ),
-    ],
+    ]
+
+
+PASSIVE_PROFILE = RuntimeProfile(
+    name="passive",
+    history_limit=30,
+    max_model_steps=4,
+    allowed_tools=frozenset({"get_current_time"}),
+    include_memory=True,
+    hooks=_default_hooks("passive"),
+)
+
+
+SCHEDULED_PROFILE = RuntimeProfile(
+    name="scheduled",
+    history_limit=30,
+    max_model_steps=4,
+    allowed_tools=frozenset({"get_current_time"}),
+    hooks=_default_hooks("scheduled"),
+)
+
+
+PROACTIVE_PROFILE = RuntimeProfile(
+    name="proactive",
+    history_limit=30,
+    max_model_steps=4,
+    allowed_tools=frozenset({"get_current_time"}),
+    hooks=_default_hooks("proactive"),
+)
+
+
+DRIFT_PROFILE = RuntimeProfile(
+    name="drift",
+    history_limit=30,
+    max_model_steps=4,
+    allowed_tools=frozenset({"get_current_time"}),
+    hooks=_default_hooks("drift"),
 )

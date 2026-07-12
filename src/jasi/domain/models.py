@@ -67,13 +67,6 @@ class MessageRecord:
 
 
 @dataclass(frozen=True)
-class InboundClaim:
-    event_id: int
-    conversation: ConversationRecord
-    message: MessageRecord
-
-
-@dataclass(frozen=True)
 class OutboxRecord:
     id: int
     conversation_id: int

@@ -5,10 +5,12 @@ from dataclasses import replace
 
 import pytest
 
+from jasi.application.context import TurnContextProvider
 from jasi.ports.model import ModelPort
 from jasi.runtime.hooks import HookSpec
 from jasi.runtime.models import ModelResponse, ToolCall, TurnRequest
-from jasi.runtime.profile import PASSIVE_PROFILE
+from jasi.runtime.profile import PASSIVE_PROFILE, SCHEDULED_PROFILE
+from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import FIXED_ERROR_REPLY, AgentRuntime
 from jasi.tools.registry import ToolRegistry
 from jasi.tools.time import get_current_time_tool
@@ -21,10 +23,19 @@ def make_runtime(
     profile=PASSIVE_PROFILE,
     model_timeout_seconds: float = 5,
 ) -> AgentRuntime:
+    catalog = PromptCatalog(
+        self_model="You are Jasi.",
+        profiles={
+            "passive": "Handle a passive conversation.",
+            "scheduled": "Execute a scheduled instruction.",
+        },
+    )
     return AgentRuntime(
-        profile=profile,
+        profiles={profile.name: profile},
         model=model,
         repository=repo,
+        context_provider=TurnContextProvider(repository=repo),
+        prompt_assembler=PromptAssembler(catalog),
         tools=ToolRegistry([get_current_time_tool]),
         model_name="test-model",
         model_timeout_seconds=model_timeout_seconds,
@@ -34,11 +45,12 @@ def make_runtime(
 
 def make_request(text: str = "current") -> TurnRequest:
     return TurnRequest(
+        work_id=2,
         session_id="telegram:1",
-        inbound_message_id=2,
-        inbound_text=text,
+        conversation_id=1,
+        input_text=text,
         profile="passive",
-        metadata={"conversation_id": 1, "message_sequence": 2},
+        history_before_sequence=2,
     )
 
 
@@ -56,6 +68,67 @@ async def test_runtime_plain_text_turn_excludes_current_message_from_history() -
     user_messages = [m.content for m in model.requests[0].messages if m.role == "user"]
     assert user_messages == ["old", "current"]
     assert repo.turns[result.turn_id]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_can_load_latest_history_for_internal_agent_work() -> None:
+    repo = FakeRepository()
+    repo.add_message(role="user", content="latest user", sequence=3)
+    repo.add_message(role="assistant", content="delivered", sequence=4)
+    model = FakeModel([ModelResponse(content="hello")])
+    request = replace(
+        make_request("internal context"),
+        history_before_sequence=None,
+    )
+
+    await make_runtime(model, repo).run(request)
+
+    messages = [(item.role, item.content) for item in model.requests[0].messages]
+    assert messages[-3:] == [
+        ("user", "latest user"),
+        ("assistant", "delivered"),
+        ("user", "internal context"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_selects_profile_without_changing_execution_flow() -> None:
+    repo = FakeRepository()
+    model = FakeModel([ModelResponse(content="scheduled reply")])
+    runtime = AgentRuntime(
+        profiles={
+            PASSIVE_PROFILE.name: PASSIVE_PROFILE,
+            SCHEDULED_PROFILE.name: SCHEDULED_PROFILE,
+        },
+        model=model,
+        repository=repo,
+        context_provider=TurnContextProvider(repository=repo),
+        prompt_assembler=PromptAssembler(
+            PromptCatalog(
+                self_model="You are Jasi.",
+                profiles={
+                    "passive": "Handle a passive conversation.",
+                    "scheduled": "Execute a scheduled instruction.",
+                },
+            )
+        ),
+        tools=ToolRegistry([get_current_time_tool]),
+        model_name="test-model",
+        model_timeout_seconds=5,
+        timezone="Asia/Shanghai",
+    )
+
+    result = await runtime.run(
+        replace(
+            make_request("prepare the reminder"),
+            work_id=3,
+            profile="scheduled",
+            history_before_sequence=None,
+        )
+    )
+
+    assert result.final_text == "scheduled reply"
+    assert "scheduled instruction" in (model.requests[0].messages[0].content or "")
 
 
 @pytest.mark.asyncio

@@ -65,10 +65,12 @@ class ModelResponse:
 
 @dataclass(frozen=True)
 class TurnRequest:
+    work_id: int
     session_id: str
-    inbound_message_id: int
-    inbound_text: str
+    conversation_id: int
+    input_text: str
     profile: str
+    history_before_sequence: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

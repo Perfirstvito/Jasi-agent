@@ -2,27 +2,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-from jasi.domain.models import (
-    InboundClaim,
-    InboundMessage,
-    MessageRecord,
-    OutboundPart,
-    OutboxRecord,
-)
+from jasi.domain.models import ConversationRecord, MessageRecord, OutboxRecord
 
 if TYPE_CHECKING:
     from jasi.runtime.models import ToolExecutionRecord, TurnStart, Usage
 
 
 class RuntimeRepositoryPort(Protocol):
-    async def load_history_before(
-        self, conversation_id: int, before_sequence: int, limit: int
+    async def load_history(
+        self, conversation_id: int, before_sequence: int | None, limit: int
     ) -> list[MessageRecord]: ...
 
     async def start_turn(
         self,
+        work_id: int,
         conversation_id: int,
-        inbound_message_id: int,
         profile: str,
         model: str,
         metadata: dict,
@@ -42,23 +36,8 @@ class RuntimeRepositoryPort(Protocol):
     async def record_tool_execution(self, turn_id: int, record: ToolExecutionRecord) -> None: ...
 
 
-class ChatRepositoryPort(Protocol):
-    async def claim_inbound_message(self, message: InboundMessage) -> InboundClaim | None: ...
-
-    async def release_inbound(self, event_id: int, error: str) -> None: ...
-
-    async def complete_inbound_response(
-        self,
-        inbound_event_id: int,
-        conversation_id: int,
-        channel: str,
-        external_chat_id: str,
-        turn_id: int,
-        text: str,
-        parts: tuple[OutboundPart, ...],
-        origin: str,
-        metadata: dict,
-    ) -> tuple[MessageRecord, list[OutboxRecord]]: ...
+class ConversationRepositoryPort(Protocol):
+    async def get_conversation(self, conversation_id: int) -> ConversationRecord | None: ...
 
 
 class OutboxRepositoryPort(Protocol):

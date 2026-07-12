@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from jasi.application.agent_work import AgentWorkHandler
+from jasi.application.agent_work import AgentWorkCommand, AgentWorkHandler
 from jasi.application.passive_service import PassiveIngressService
 from jasi.application.work import WorkDispatcher, WorkFinalizer, WorkWorker
 from jasi.domain.models import InboundMessage
@@ -96,6 +96,29 @@ async def test_passive_ingress_can_map_channels_to_a_shared_memory_scope() -> No
     )
 
     assert repository.scope_keys == ["owner", "owner"]
+
+
+@pytest.mark.asyncio
+async def test_agent_work_parses_a_narrowing_tool_grant() -> None:
+    work_repo = FakeWorkRepository()
+    queued = await work_repo.enqueue_work(
+        WorkSpec(
+            kind="scheduled",
+            action="agent",
+            dedupe_key="scheduled:tool-grant",
+            session_id="telegram:1",
+            conversation_id=1,
+            profile="scheduled",
+            input_text="inspect issues",
+            payload={"tool_grant": {"tools": ["list_issues"]}},
+            priority=70,
+        )
+    )
+
+    command = AgentWorkCommand.from_record(queued.work)
+
+    assert command.tool_grant is not None
+    assert command.tool_grant.tool_names == frozenset({"list_issues"})
 
 
 @pytest.mark.asyncio

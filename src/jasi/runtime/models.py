@@ -33,6 +33,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolGrant:
+    tool_names: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(name, str) or not name.strip() for name in self.tool_names):
+            raise ValueError("tool grant names must be non-empty strings")
+        object.__setattr__(
+            self,
+            "tool_names",
+            frozenset(name.strip() for name in self.tool_names),
+        )
+
+
+@dataclass(frozen=True)
 class ModelMessage:
     role: str
     content: str | None = None
@@ -71,6 +85,7 @@ class TurnRequest:
     input_text: str
     profile: str
     history_before_sequence: int | None = None
+    tool_grant: ToolGrant | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

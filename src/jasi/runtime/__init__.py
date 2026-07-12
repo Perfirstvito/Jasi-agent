@@ -1,4 +1,4 @@
-from jasi.runtime.models import TurnRequest, TurnResult
+from jasi.runtime.models import ToolGrant, TurnRequest, TurnResult
 from jasi.runtime.profile import (
     DRIFT_PROFILE,
     PASSIVE_PROFILE,
@@ -15,6 +15,7 @@ __all__ = [
     "PROACTIVE_PROFILE",
     "RuntimeProfile",
     "SCHEDULED_PROFILE",
+    "ToolGrant",
     "TurnRequest",
     "TurnResult",
 ]

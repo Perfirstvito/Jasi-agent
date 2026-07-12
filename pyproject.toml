@@ -15,6 +15,7 @@ dependencies = [
   "croniter>=6.0.0",
   "pgvector>=0.3.6",
   "markdown-it-py>=3.0.0",
+  "jsonschema>=4.23.0",
 ]
 
 [dependency-groups]

@@ -53,8 +53,7 @@ from jasi.runtime.profile import (
 )
 from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import AgentRuntime
-from jasi.tools.registry import ToolRegistry
-from jasi.tools.time import get_current_time_tool
+from jasi.tools.builtin import build_builtin_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +160,7 @@ async def run() -> None:
             lease_seconds=settings.memory_job_lease_seconds,
             reconcile_seconds=settings.memory_reconcile_seconds,
         )
-        tools = ToolRegistry([get_current_time_tool])
+        tools = build_builtin_tool_registry()
         prompt_catalog = PromptCatalog.load(
             Path(settings.prompt_dir),
             {"passive", "proactive", "scheduled", "drift"},

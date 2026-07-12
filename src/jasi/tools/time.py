@@ -5,11 +5,11 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jasi.runtime.errors import ToolRejected
-from jasi.tools.registry import ToolSpec
+from jasi.tools.registry import ToolExecutionContext, ToolSpec
 
 
-def _get_current_time(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    raw_timezone = arguments.get("timezone") or context.get("timezone") or "Asia/Shanghai"
+def _get_current_time(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    raw_timezone = arguments.get("timezone") or context.timezone or "Asia/Shanghai"
     if not isinstance(raw_timezone, str):
         raise ToolRejected("timezone must be a string")
     try:
@@ -37,6 +37,7 @@ get_current_time_tool = ToolSpec(
         },
         "additionalProperties": False,
     },
-    risk="low",
+    risk="read-only",
     handler=_get_current_time,
+    search_terms=("time", "date", "clock", "时间", "日期", "几点"),
 )

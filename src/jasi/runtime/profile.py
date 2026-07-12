@@ -15,8 +15,13 @@ class RuntimeProfile:
     history_limit: int
     max_model_steps: int
     allowed_tools: frozenset[str]
+    base_tools: frozenset[str]
     include_memory: bool = False
     hooks: list[HookSpec] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.base_tools <= self.allowed_tools:
+            raise ValueError(f"profile base tools must be allowed: {self.name}")
 
 
 def _tool_safety_guard(context: HookContext, payload: Any) -> None:
@@ -58,7 +63,8 @@ PASSIVE_PROFILE = RuntimeProfile(
     name="passive",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time"}),
+    allowed_tools=frozenset({"get_current_time", "tool_search"}),
+    base_tools=frozenset({"get_current_time", "tool_search"}),
     include_memory=True,
     hooks=_default_hooks("passive"),
 )
@@ -68,7 +74,8 @@ SCHEDULED_PROFILE = RuntimeProfile(
     name="scheduled",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time"}),
+    allowed_tools=frozenset({"get_current_time", "tool_search"}),
+    base_tools=frozenset({"get_current_time", "tool_search"}),
     hooks=_default_hooks("scheduled"),
 )
 
@@ -77,7 +84,8 @@ PROACTIVE_PROFILE = RuntimeProfile(
     name="proactive",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time"}),
+    allowed_tools=frozenset({"get_current_time", "tool_search"}),
+    base_tools=frozenset({"get_current_time", "tool_search"}),
     hooks=_default_hooks("proactive"),
 )
 
@@ -86,6 +94,7 @@ DRIFT_PROFILE = RuntimeProfile(
     name="drift",
     history_limit=30,
     max_model_steps=4,
-    allowed_tools=frozenset({"get_current_time"}),
+    allowed_tools=frozenset({"get_current_time", "tool_search"}),
+    base_tools=frozenset({"get_current_time", "tool_search"}),
     hooks=_default_hooks("drift"),
 )

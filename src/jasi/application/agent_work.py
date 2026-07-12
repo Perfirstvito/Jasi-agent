@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from jasi.domain.work import OutboundDraft, WorkExecutionResult, WorkRecord
 from jasi.ports.repository import ConversationRepositoryPort
 from jasi.ports.runtime import AgentRuntimePort
-from jasi.runtime.models import TurnRequest
+from jasi.runtime.models import ToolGrant, TurnRequest
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class AgentWorkCommand:
     profile: str
     input_text: str
     history_before_sequence: int | None
+    tool_grant: ToolGrant | None
 
     @classmethod
     def from_record(cls, work: WorkRecord) -> AgentWorkCommand:
@@ -33,6 +34,16 @@ class AgentWorkCommand:
         ):
             raise ValueError("history_before_sequence must be an integer")
 
+        raw_grant = work.payload.get("tool_grant")
+        tool_grant: ToolGrant | None = None
+        if raw_grant is not None:
+            if not isinstance(raw_grant, dict) or not isinstance(raw_grant.get("tools"), list):
+                raise ValueError("tool_grant must contain a tools list")
+            raw_names = raw_grant["tools"]
+            if any(not isinstance(name, str) or not name.strip() for name in raw_names):
+                raise ValueError("tool_grant tools must be non-empty strings")
+            tool_grant = ToolGrant(frozenset(raw_names))
+
         return cls(
             work_id=work.id,
             kind=work.kind,
@@ -41,6 +52,7 @@ class AgentWorkCommand:
             profile=work.profile,
             input_text=work.input_text,
             history_before_sequence=before_sequence,
+            tool_grant=tool_grant,
         )
 
 
@@ -68,6 +80,7 @@ class AgentWorkHandler:
                 input_text=command.input_text,
                 profile=command.profile,
                 history_before_sequence=command.history_before_sequence,
+                tool_grant=command.tool_grant,
                 metadata={"work_kind": command.kind},
             )
         )

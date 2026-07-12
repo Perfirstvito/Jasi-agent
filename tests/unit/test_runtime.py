@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
 from jasi.application.context import TurnContextProvider
 from jasi.ports.model import ModelPort
 from jasi.runtime.hooks import HookSpec
-from jasi.runtime.models import ModelResponse, ToolCall, TurnRequest
+from jasi.runtime.models import ModelResponse, ToolCall, ToolGrant, TurnRequest
 from jasi.runtime.profile import PASSIVE_PROFILE, SCHEDULED_PROFILE
 from jasi.runtime.prompting import PromptAssembler, PromptCatalog
 from jasi.runtime.runtime import FIXED_ERROR_REPLY, AgentRuntime
-from jasi.tools.registry import ToolRegistry
-from jasi.tools.time import get_current_time_tool
+from jasi.tools.builtin import build_builtin_tool_registry
+from jasi.tools.registry import ToolExecutionContext, ToolOutcome, ToolRegistry, ToolSpec
 from tests.unit.fakes import FakeModel, FakeRepository
 
 
@@ -22,6 +24,7 @@ def make_runtime(
     repo: FakeRepository,
     profile=PASSIVE_PROFILE,
     model_timeout_seconds: float = 5,
+    tools: ToolRegistry | None = None,
 ) -> AgentRuntime:
     catalog = PromptCatalog(
         self_model="You are Jasi.",
@@ -36,7 +39,7 @@ def make_runtime(
         repository=repo,
         context_provider=TurnContextProvider(repository=repo),
         prompt_assembler=PromptAssembler(catalog),
-        tools=ToolRegistry([get_current_time_tool]),
+        tools=tools or build_builtin_tool_registry(),
         model_name="test-model",
         model_timeout_seconds=model_timeout_seconds,
         timezone="Asia/Shanghai",
@@ -51,6 +54,25 @@ def make_request(text: str = "current") -> TurnRequest:
         input_text=text,
         profile="passive",
         history_before_sequence=2,
+    )
+
+
+def recording_tool(name: str, calls: list[dict[str, Any]]) -> ToolSpec:
+    def execute(arguments: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+        calls.append(dict(arguments))
+        return {"tool": name, "ok": True}
+
+    return ToolSpec(
+        name=name,
+        description=f"Work with GitHub issues using {name}.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        risk="read-only",
+        handler=execute,
+        search_terms=("github issues",),
     )
 
 
@@ -112,7 +134,7 @@ async def test_runtime_selects_profile_without_changing_execution_flow() -> None
                 },
             )
         ),
-        tools=ToolRegistry([get_current_time_tool]),
+        tools=build_builtin_tool_registry(),
         model_name="test-model",
         model_timeout_seconds=5,
         timezone="Asia/Shanghai",
@@ -153,6 +175,144 @@ async def test_runtime_tool_call_then_final_reply() -> None:
     assert model.requests[1].messages[-1].role == "tool"
     assert repo.tool_records[0][1].name == "get_current_time"
     assert repo.tool_records[0][1].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_reveals_authorized_hidden_tool_on_next_model_step() -> None:
+    repo = FakeRepository()
+    calls: list[dict[str, Any]] = []
+    tools = build_builtin_tool_registry()
+    tools.register(recording_tool("list_issues", calls))
+    profile = replace(
+        PASSIVE_PROFILE,
+        allowed_tools=PASSIVE_PROFILE.allowed_tools | {"list_issues"},
+    )
+    model = FakeModel(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(id="search_1", name="tool_search", arguments={"query": "issues"})
+                ]
+            ),
+            ModelResponse(tool_calls=[ToolCall(id="issues_1", name="list_issues", arguments={})]),
+            ModelResponse(content="There are two open issues."),
+        ]
+    )
+
+    result = await make_runtime(model, repo, profile=profile, tools=tools).run(
+        make_request("summarize the issues")
+    )
+
+    assert result.status == "succeeded"
+    assert calls == [{}]
+    assert "list_issues" not in {tool.name for tool in model.requests[0].tools}
+    assert "list_issues" in {tool.name for tool in model.requests[1].tools}
+    assert [record.name for record in result.tool_records] == ["tool_search", "list_issues"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_execute_newly_revealed_tool_in_same_batch() -> None:
+    repo = FakeRepository()
+    calls: list[dict[str, Any]] = []
+    tools = build_builtin_tool_registry()
+    tools.register(recording_tool("list_issues", calls))
+    profile = replace(
+        PASSIVE_PROFILE,
+        allowed_tools=PASSIVE_PROFILE.allowed_tools | {"list_issues"},
+    )
+    model = FakeModel(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(id="search_1", name="tool_search", arguments={"query": "issues"}),
+                    ToolCall(id="issues_1", name="list_issues", arguments={}),
+                ]
+            ),
+            ModelResponse(content="I need another step before using it."),
+        ]
+    )
+
+    result = await make_runtime(model, repo, profile=profile, tools=tools).run(make_request())
+
+    assert result.status == "succeeded"
+    assert calls == []
+    assert [record.status for record in result.tool_records] == ["succeeded", "rejected"]
+    assert result.tool_records[1].result["error"] == "tool_not_visible"
+    assert "list_issues" in {tool.name for tool in model.requests[1].tools}
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_grant_only_narrows_profile_tools() -> None:
+    repo = FakeRepository()
+    tools = build_builtin_tool_registry()
+    tools.register(recording_tool("list_issues", []))
+    tools.register(recording_tool("close_issue", []))
+    profile = replace(
+        PASSIVE_PROFILE,
+        allowed_tools=PASSIVE_PROFILE.allowed_tools | {"list_issues", "close_issue"},
+    )
+    model = FakeModel(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(id="search_1", name="tool_search", arguments={"query": "issues"})
+                ]
+            ),
+            ModelResponse(content="I can only inspect issues."),
+        ]
+    )
+    request = replace(
+        make_request(),
+        tool_grant=ToolGrant(frozenset({"list_issues"})),
+    )
+
+    result = await make_runtime(model, repo, profile=profile, tools=tools).run(request)
+
+    search_result = json.loads(model.requests[1].messages[-1].content or "{}")
+    assert [item["name"] for item in search_result["matched"]] == ["list_issues"]
+    assert "close_issue" not in repo.turns[result.turn_id]["metadata"]["authorized_tools"]
+    assert "list_issues" in repo.turns[result.turn_id]["metadata"]["authorized_tools"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_ignores_reveal_outside_authorized_scope() -> None:
+    def reveal_unapproved(
+        _arguments: dict[str, Any], _context: ToolExecutionContext
+    ) -> ToolOutcome:
+        return ToolOutcome(content={"ok": True}, reveal_tools=("close_issue",))
+
+    tools = build_builtin_tool_registry()
+    tools.register(
+        ToolSpec(
+            name="reveal_unapproved",
+            description="Test the generic reveal boundary.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            risk="read-only",
+            handler=reveal_unapproved,
+        )
+    )
+    tools.register(recording_tool("close_issue", []))
+    profile = replace(
+        PASSIVE_PROFILE,
+        allowed_tools=PASSIVE_PROFILE.allowed_tools | {"reveal_unapproved"},
+        base_tools=PASSIVE_PROFILE.base_tools | {"reveal_unapproved"},
+    )
+    model = FakeModel(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="reveal_1", name="reveal_unapproved", arguments={})]
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
+
+    await make_runtime(model, FakeRepository(), profile=profile, tools=tools).run(make_request())
+
+    assert "close_issue" not in {tool.name for tool in model.requests[1].tools}
 
 
 @pytest.mark.asyncio

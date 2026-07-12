@@ -52,8 +52,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
     from jasi.runtime.profile import PASSIVE_PROFILE, PROACTIVE_PROFILE
     from jasi.runtime.prompting import PromptAssembler, PromptCatalog
     from jasi.runtime.runtime import AgentRuntime
-    from jasi.tools.registry import ToolRegistry
-    from jasi.tools.time import get_current_time_tool
+    from jasi.tools.builtin import build_builtin_tool_registry
     from tests.unit.fakes import FakeChannel, FakeModel
 
     database_url = os.environ["JASI_TEST_DATABASE_URL"]
@@ -262,7 +261,7 @@ async def test_source_poll_planner_priority_runtime_and_outbox() -> None:
                     },
                 )
             ),
-            tools=ToolRegistry([get_current_time_tool]),
+            tools=build_builtin_tool_registry(),
             model_name="test-model",
             model_timeout_seconds=5,
             timezone="Asia/Shanghai",

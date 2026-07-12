@@ -34,7 +34,8 @@ from jasi.runtime.models import (
 )
 from jasi.runtime.profile import RuntimeProfile
 from jasi.runtime.prompting import PromptAssembler
-from jasi.tools.registry import ToolRegistry
+from jasi.runtime.tool_session import ToolSession
+from jasi.tools.registry import ToolExecutionContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,11 @@ class AgentRuntime:
         self._context_provider = context_provider
         self._prompt_assembler = prompt_assembler
         self._tools = tools
+        for profile in self._profiles.values():
+            unknown_tools = profile.allowed_tools - tools.registered_names
+            if unknown_tools:
+                names = ", ".join(sorted(unknown_tools))
+                raise ValueError(f"profile {profile.name} references unregistered tools: {names}")
         self._model_name = model_name
         self._model_timeout_seconds = model_timeout_seconds
         self._timezone = timezone
@@ -77,12 +83,22 @@ class AgentRuntime:
         except KeyError as exc:
             raise ValueError(f"unsupported profile: {request.profile}") from exc
 
+        tool_session = ToolSession.start(
+            profile=profile,
+            grant=request.tool_grant,
+            registered_names=self._tools.registered_names,
+        )
+
         turn_start = await self._repository.start_turn(
             work_id=request.work_id,
             conversation_id=request.conversation_id,
             profile=request.profile,
             model=self._model_name,
-            metadata={**request.metadata, "session_id": request.session_id},
+            metadata={
+                **request.metadata,
+                "session_id": request.session_id,
+                "authorized_tools": sorted(tool_session.allowed_names),
+            },
         )
         if turn_start.cached_result is not None:
             logger.info(
@@ -114,14 +130,13 @@ class AgentRuntime:
                 context=context,
                 input_text=request.input_text,
             )
-            tools = self._tools.definitions(profile.allowed_tools)
-
             while steps < profile.max_model_steps:
                 steps += 1
+                step_visible = tool_session.visible_names
                 model_request = ModelRequest(
                     model=self._model_name,
                     messages=list(messages),
-                    tools=tools,
+                    tools=self._tools.definitions(step_visible),
                     timeout_seconds=self._model_timeout_seconds,
                 )
                 model_request = await hooks.run(
@@ -155,14 +170,22 @@ class AgentRuntime:
                             tool_calls=response.tool_calls,
                         )
                     )
+                    reveal_after_step: list[str] = []
                     for tool_call in response.tool_calls:
-                        record = await self._execute_tool(
-                            request,
-                            profile,
-                            hooks,
-                            turn_id,
-                            tool_call,
-                        )
+                        if tool_session.is_allowed(tool_call.name) and (
+                            tool_call.name not in step_visible
+                        ):
+                            record = self._not_visible_record(tool_call)
+                            reveal_tools: tuple[str, ...] = ()
+                        else:
+                            record, reveal_tools = await self._execute_tool(
+                                request,
+                                hooks,
+                                turn_id,
+                                tool_call,
+                                allowed_tools=tool_session.allowed_names,
+                                visible_tools=step_visible,
+                            )
                         tool_records.append(record)
                         await self._repository.record_tool_execution(turn_id, record)
                         messages.append(
@@ -172,6 +195,9 @@ class AgentRuntime:
                                 content=json.dumps(record.result, ensure_ascii=False, default=str),
                             )
                         )
+                        if record.status == "succeeded":
+                            reveal_after_step.extend(reveal_tools)
+                    tool_session.reveal(tuple(reveal_after_step))
                     continue
 
                 final_text = (response.content or "").strip()
@@ -214,33 +240,47 @@ class AgentRuntime:
     async def _execute_tool(
         self,
         request: TurnRequest,
-        profile: RuntimeProfile,
         hooks: HookManager,
         turn_id: int,
         tool_call: ToolCall,
-    ) -> ToolExecutionRecord:
+        *,
+        allowed_tools: frozenset[str],
+        visible_tools: frozenset[str],
+    ) -> tuple[ToolExecutionRecord, tuple[str, ...]]:
         started = time.monotonic()
         context = self._hook_context(
             request,
             turn_id,
             {
                 "tool_name": tool_call.name,
-                "allowed_tools": sorted(profile.allowed_tools),
+                "allowed_tools": sorted(allowed_tools),
+                "visible_tools": sorted(visible_tools),
             },
         )
         try:
             await hooks.run("before_tool", context, tool_call)
-            if tool_call.name not in profile.allowed_tools:
+            if tool_call.name not in allowed_tools:
                 raise ToolRejected(f"tool not allowed: {tool_call.name}")
-            result = await self._tools.execute(
+            if tool_call.name not in visible_tools:
+                raise ToolRejected(f"tool not visible: {tool_call.name}")
+            outcome = await self._tools.execute(
                 tool_call.name,
                 tool_call.arguments,
-                {"timezone": self._timezone, "session_id": request.session_id},
+                ToolExecutionContext(
+                    work_id=request.work_id,
+                    session_id=request.session_id,
+                    conversation_id=request.conversation_id,
+                    profile=request.profile,
+                    timezone=self._timezone,
+                    allowed_tools=allowed_tools,
+                    visible_tools=visible_tools,
+                    metadata=request.metadata,
+                ),
             )
             record = ToolExecutionRecord(
                 name=tool_call.name,
                 arguments=tool_call.arguments,
-                result=result,
+                result=outcome.content,
                 risk=self._tools.risk(tool_call.name),
                 status="succeeded",
                 duration_ms=self._elapsed_ms(started),
@@ -248,7 +288,7 @@ class AgentRuntime:
             record = await hooks.run("after_tool", context, record)
             if not isinstance(record, ToolExecutionRecord):
                 raise HookTransformFailed("after_tool returned an invalid tool record")
-            return record
+            return record, outcome.reveal_tools
         except HookGuardRejected:
             record = ToolExecutionRecord(
                 name=tool_call.name,
@@ -277,6 +317,20 @@ class AgentRuntime:
             )
             await self._repository.record_tool_execution(turn_id, record)
             raise
+
+    def _not_visible_record(self, tool_call: ToolCall) -> ToolExecutionRecord:
+        return ToolExecutionRecord(
+            name=tool_call.name,
+            arguments=tool_call.arguments,
+            result={
+                "error": "tool_not_visible",
+                "message": "Find and load this authorized tool before calling it.",
+            },
+            risk=self._tools.risk(tool_call.name),
+            status="rejected",
+            duration_ms=0,
+            error_message="tool is authorized but not visible",
+        )
 
     async def _commit_result(
         self,

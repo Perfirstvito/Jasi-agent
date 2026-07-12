@@ -18,8 +18,8 @@ Telegram private text
 ```
 
 The first profile is intentionally narrow: private Telegram text only, no group chat,
-no attachments, one configured model, one runtime process, and one tool
-(`get_current_time`).
+no attachments, one main Runtime model, one lightweight background model, one runtime
+process, and one tool (`get_current_time`).
 
 Scheduled jobs are a separate timing domain. `at`, `interval`, and cron rules create a
 unique occurrence and a durable Work in one transaction. A `direct` job skips the model;
@@ -76,14 +76,22 @@ window. A sent proactive message may provide context only when a later passive b
 it does not create a MemoryJob and cannot be the evidence for a user fact.
 
 Stable Markdown and recent summaries are always supplied as derived reference context.
-Episodic recall uses a gate, query rewrite, optional HyDE vectors, pgvector/trigram search,
-model reranking, a sufficiency check, and a context budget. Retrieval and audit failures fall
-back without blocking the passive reply.
+Episodic recall preserves the exact user utterance as the anchor query, then adds rewritten
+and optional HyDE queries. Original and rewritten text both use semantic and trigram search;
+the audit records every variant and its hit IDs before merge, rerank, sufficiency, and context
+budgeting. This prevents a concise rewrite from silently dropping dates, names, punctuation,
+or other user details.
+
+`JASI_OPENAI_*` is reserved for user-visible Runtime execution. Memory extraction,
+reconciliation, summaries, Gate, Rewrite, HyDE, Rerank, and Sufficiency use the independent
+`JASI_LIGHT_MODEL_*` endpoint. If all three light endpoint values are omitted, Jasi falls back
+to the main model for compatibility.
 
 Embedding is optional. Leave `JASI_MEMORY_EMBEDDING_BASE_URL` and
 `JASI_MEMORY_EMBEDDING_API_KEY` unset for lexical-only retrieval. Configure a real
-OpenAI-compatible embeddings endpoint to enable 1536-dimensional hybrid retrieval; many chat
-providers, including endpoints that only implement Chat Completions, do not provide this API.
+OpenAI-compatible embeddings endpoint to enable 1024-dimensional hybrid retrieval. The checked
+example matches Akashic's DashScope `text-embedding-v3` configuration; many chat-only providers
+do not implement this API.
 
 By default, memory identity is `channel:user_id`. `JASI_MEMORY_SCOPE_MAP` can map Telegram,
 Feishu, or future channel identities to one owner scope:

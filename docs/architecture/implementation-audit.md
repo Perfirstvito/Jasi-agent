@@ -34,6 +34,7 @@ ToolExecution。它不导入 Trigger、Telegram、Outbox、Schedule、Source、D
 | Phase 5 | DriftOpportunity、idle/cooldown gate、共享 InitiativePlanner/Runtime |
 | Phase 6 | Work heartbeat、后台配额、Effect Outbox、运维聚合查询 |
 | Phase 7 | 静态 Persona/Profile、不可变上下文快照、Markdown 权威 passive memory 与可重建检索索引 |
+| Phase 8 | Akashic fast/embedding 模型路由、原语锚定双查询和结构化 retrieval audit |
 
 Prompt 采用静态 `persona.md` 和四个 Profile Markdown，由 `PromptAssembler` 显式组装。Memory 只作为
 `TurnContextSnapshot` 中的 derived reference data 进入模型；仍不引入 Prompt DSL、动态插件或依赖图。
@@ -105,6 +106,12 @@ Source 通过显式 `SourcePort` registry 注册，Channel 通过 OutboxDispatch
 只有成功送达的 passive model reply 会创建 consolidation job。已送达 proactive assistant 可在用户后来
 回复形成的 passive 窗口中提供上下文，但不能单独作为用户事实证据；没有后续互动时不会污染长期记忆。
 
+### 13. Query Rewrite 不替代用户原语
+
+Original utterance 和 rewritten query 分别进行 lexical/semantic search，HyDE 只做第三路增强。审计的
+`query_variants` 保存每路完整文本、搜索模式和命中 ID；Gate skip 也保留 original。提取、摘要和检索判断
+走独立 `JASI_LIGHT_MODEL_*`，用户可见 Runtime 仍走主模型。
+
 ## 竞态处理
 
 | 竞态 | 当前处理 |
@@ -134,3 +141,4 @@ Source 通过显式 `SourcePort` registry 注册，Channel 通过 OutboxDispatch
 - 首版仍是单应用进程；数据库约束、lease 和 SKIP LOCKED 已允许未来多 worker，但没有分布式限流服务。
 - Memory 的四个 Markdown 文件不是数据库备份的投影；文件系统丢失后不能从 PostgreSQL 反向恢复。
 - Embedding 未配置时使用 trigram lexical recall；配置兼容 endpoint 后启用 pgvector + HyDE 混合检索。
+- 当前 Akashic-compatible embedding 空间固定为 1024 维；切换模型必须显式迁移并重建 Markdown 索引。

@@ -11,6 +11,7 @@ Passive Memory V1 为被动对话提供长期画像、事件记忆和滑出短�
 5. 用户事实必须引用同一 memory scope 内的 user message；assistant 只能提供上下文。
 6. Memory 读取、检索和审计故障不能阻断当前 passive 回复。
 7. 同一 memory scope 的维护串行，不同 scope 可以并发。
+8. 用户原语是检索 anchor，不允许 Query Rewrite 覆盖或替代原始细节。
 
 ## 模块边界
 
@@ -50,6 +51,20 @@ Application 层只依赖以下 Port：
 - `MemoryMaintenanceReasonerPort` / `MemoryRetrievalReasonerPort`：受约束的模型推理。
 
 具体实现分别位于 Markdown、PostgreSQL 和 OpenAI-compatible adapter；Runtime 主循环不导入这些类型。
+
+## 模型路由
+
+用户可见的 passive/scheduled/proactive/drift Runtime 继续使用 `JASI_OPENAI_*` 主模型。以下无用户直接
+输出的后台推理统一使用 `JASI_LIGHT_MODEL_*`：
+
+- memory candidate extraction；
+- stable reconciliation；
+- recent context summary；
+- retrieval Gate、Query Rewrite、HyDE、Rerank 和 Sufficiency。
+
+当前本地配置沿用 Akashic 的 `qwen-flash` fast endpoint；embedding 沿用
+`text-embedding-v3`。三项 light endpoint 配置必须一起提供；全部省略时才整体回退主模型。这样 Runtime
+的最低层模型/工具循环不因后台成本路由而改变。
 
 ## 权威文档
 
@@ -139,7 +154,7 @@ Episodic recall 顺序：
 Memory Gate
 -> Query Rewrite
 -> optional HyDE
--> semantic + trigram searches (or lexical-only)
+-> original + rewritten + optional HyDE searches
 -> merge and score threshold
 -> model Rerank
 -> Sufficiency Check
@@ -151,20 +166,26 @@ Stable records不再参加 episodic 搜索，因为其权威 Markdown 已全文�
 Gate 只控制 episodic 搜索，不会移除稳定画像和最近摘要。所有 Memory Context 的 trust 都是 `derived`，
 Prompt 将其包在 `data-reference-only` frame 中；当前用户明确陈述优先于可能过期的记忆。
 
-检索审计以 Turn 唯一记录原 query、rewrite、HyDE、gate、sufficiency、阶段错误、候选分数和实际注入
-标记。审计写入失败只记录日志。
+原始用户表达与改写查询是两条独立检索路径：两者都做 trigram；配置 embedding 后也各自生成 vector。
+HyDE 只提供第三条增强路径，不能替代 original 检索路径和审计。合并按 record ID 去重并保留各路径
+最高分，再交给轻量模型 rerank。
+
+检索审计以 Turn 唯一记录原 query、rewrite、HyDE、gate、sufficiency、轻量模型名、阶段错误、候选分数
+和实际注入标记。结构化 `query_variants` 对每条路径保存完整文本、是否执行 semantic/lexical，以及该路径
+的 hit record IDs。即使 Gate skip，也会保存未搜索的完整 original variant。审计写入失败只记录日志。
 
 ## Embedding 降级
 
 Embedding 是显式可选能力：
 
 - 未配置 `JASI_MEMORY_EMBEDDING_BASE_URL`：不发送 embedding 请求，使用 rewrite + trigram + rerank。
-- 已配置 endpoint：索引 1536 维向量，query rewrite 与 HyDE 各生成向量并和 trigram 结果融合。
+- 已配置 endpoint：索引 1024 维向量，original、query rewrite 与 HyDE 各生成向量并和 trigram 结果融合。
 - query embedding 临时失败：当前 Turn 降级 lexical search。
 - 文档 embedding 失败：maintenance job 重试，不伪造向量，也不把失败索引当作成功。
 
-`JASI_MEMORY_EMBEDDING_API_KEY` 在配置 endpoint 时可省略，此时复用 Chat Completions key。只有当同一
-provider 确实支持 `/embeddings` 时才应这样做。
+`JASI_MEMORY_EMBEDDING_BASE_URL` 和 API key 必须一起配置，避免把 DeepSeek 等主模型 key 误发给另一个
+provider。`0011_akashic_model_routing` 会清空旧 1536 维模型空间中的向量、把列迁移为 1024 维，并使
+`MEMORY.md`/`HISTORY.md` 索引 hash 失效；worker 随后从权威 Markdown 使用新模型重建。
 
 ## 跨渠道 Scope
 
@@ -187,7 +208,7 @@ sent assistant history，保证系统知道自己发过什么，但它不会创�
 ## 运维要求
 
 - `workspace/memory` 已从 Git 排除，但生产环境必须挂载持久卷并纳入备份。
-- 应用不会自动迁移；当前要求 Alembic revision 为 `0010_memory_job_batching`。
+- 应用不会自动迁移；当前要求 Alembic revision 为 `0012_memory_query_variants`。
 - 人工编辑会在定期 reconcile 时按 hash 创建 reindex job，不需要重启。
 - `memory_jobs.last_error`、attempts、lease 和状态聚合查询用于诊断；错误文本会截断且不包含应用密钥。
 - pgvector 是索引能力，不是 Markdown 备份。禁止实现隐式 DB -> Markdown 恢复。

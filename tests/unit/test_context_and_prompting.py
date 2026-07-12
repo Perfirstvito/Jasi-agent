@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jasi.application.context import TurnContextProvider
@@ -65,10 +67,10 @@ async def test_memory_failure_does_not_block_history_context() -> None:
     assert snapshot.context_items == ()
 
 
-def test_prompt_assembler_keeps_persona_profile_context_and_history_separate() -> None:
+def test_prompt_assembler_keeps_self_profile_context_and_history_separate() -> None:
     assembler = PromptAssembler(
         PromptCatalog(
-            persona="# Persona\nFixed identity.",
+            self_model="# Self\nFixed identity.",
             profiles={"passive": "# Passive\nReply to the current message."},
         )
     )
@@ -90,3 +92,19 @@ def test_prompt_assembler_keeps_persona_profile_context_and_history_separate() -
     assert "Reply to the current message" in (messages[0].content or "")
     assert "reference-only" in (messages[1].content or "")
     assert messages[-1].content == "hello"
+
+
+def test_checked_in_self_prompt_defines_bounded_emotional_responses() -> None:
+    prompt_root = Path(__file__).parents[2] / "prompts"
+
+    catalog = PromptCatalog.load(prompt_root, {"passive"})
+    system_prompt = PromptAssembler(catalog).build(
+        profile_name="passive",
+        context=TurnContextSnapshot(),
+        input_text="hello",
+    )[0].content
+
+    assert system_prompt is not None
+    assert "长期 AI 协作伙伴" in system_prompt
+    assert "条件化情绪表达" in system_prompt
+    assert "用户指出你犯错或对你不满时" in system_prompt

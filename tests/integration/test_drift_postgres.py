@@ -202,7 +202,7 @@ async def test_drift_idle_gate_passive_cancellation_runtime_and_outbox() -> None
             context_provider=TurnContextProvider(repository=repository),
             prompt_assembler=PromptAssembler(
                 PromptCatalog(
-                    persona="You are Jasi.",
+                    self_model="You are Jasi.",
                     profiles={"drift": "Handle drift context."},
                 )
             ),

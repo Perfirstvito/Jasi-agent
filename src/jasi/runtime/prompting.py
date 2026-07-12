@@ -22,26 +22,26 @@ SYSTEM_POLICY = """# Runtime Policy
 
 @dataclass(frozen=True)
 class PromptCatalog:
-    persona: str
+    self_model: str
     profiles: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        persona = self.persona.strip()
+        self_model = self.self_model.strip()
         profiles = {key: value.strip() for key, value in self.profiles.items()}
-        if not persona:
-            raise ValueError("persona prompt cannot be empty")
+        if not self_model:
+            raise ValueError("self prompt cannot be empty")
         if not profiles or any(not key.strip() or not value for key, value in profiles.items()):
             raise ValueError("profile prompts cannot be empty")
-        object.__setattr__(self, "persona", persona)
+        object.__setattr__(self, "self_model", self_model)
         object.__setattr__(self, "profiles", MappingProxyType(profiles))
 
     @classmethod
     def load(cls, root: Path, profile_names: set[str]) -> PromptCatalog:
-        persona_path = root / "persona.md"
+        self_path = root / "self.md"
         try:
-            persona = persona_path.read_text(encoding="utf-8")
+            self_model = self_path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ValueError(f"cannot read persona prompt: {persona_path}") from exc
+            raise ValueError(f"cannot read self prompt: {self_path}") from exc
 
         profiles: dict[str, str] = {}
         for name in sorted(profile_names):
@@ -50,7 +50,7 @@ class PromptCatalog:
                 profiles[name] = path.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ValueError(f"cannot read profile prompt: {path}") from exc
-        return cls(persona=persona, profiles=profiles)
+        return cls(self_model=self_model, profiles=profiles)
 
 
 class PromptAssembler:
@@ -69,7 +69,9 @@ class PromptAssembler:
         except KeyError as exc:
             raise ValueError(f"missing prompt profile: {profile_name}") from exc
 
-        system_prompt = "\n\n".join((SYSTEM_POLICY.strip(), self._catalog.persona, profile_prompt))
+        system_prompt = "\n\n".join(
+            (SYSTEM_POLICY.strip(), self._catalog.self_model, profile_prompt)
+        )
         messages = [ModelMessage(role="system", content=system_prompt)]
         if context.context_items:
             frame = [

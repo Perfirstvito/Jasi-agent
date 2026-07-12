@@ -33,10 +33,11 @@ ToolExecution。它不导入 Trigger、Telegram、Outbox、Schedule、Source、D
 | Phase 4 | SourcePort、持久化 cursor/items、proactive cooldown planner |
 | Phase 5 | DriftOpportunity、idle/cooldown gate、共享 InitiativePlanner/Runtime |
 | Phase 6 | Work heartbeat、后台配额、Effect Outbox、运维聚合查询 |
-| Phase 7 | 静态 Persona/Profile、不可变上下文快照、Markdown 权威 passive memory 与可重建检索索引 |
+| Phase 7 | 静态 Self/Profile、不可变上下文快照、Markdown 权威 passive memory 与可重建检索索引 |
 | Phase 8 | Akashic fast/embedding 模型路由、原语锚定双查询和结构化 retrieval audit |
 
-Prompt 采用静态 `persona.md` 和四个 Profile Markdown，由 `PromptAssembler` 显式组装。Memory 只作为
+Prompt 采用静态 `self.md` 和四个 Profile Markdown，由 `PromptAssembler` 显式组装。`self.md` 定义
+Jasi 的稳定身份、关系边界、表达习惯和条件化情绪反应，不由 Memory Worker 自动改写。Memory 只作为
 `TurnContextSnapshot` 中的 derived reference data 进入模型；仍不引入 Prompt DSL、动态插件或依赖图。
 
 ## 不变量证据

@@ -24,7 +24,7 @@ def make_runtime(
     model_timeout_seconds: float = 5,
 ) -> AgentRuntime:
     catalog = PromptCatalog(
-        persona="You are Jasi.",
+        self_model="You are Jasi.",
         profiles={
             "passive": "Handle a passive conversation.",
             "scheduled": "Execute a scheduled instruction.",
@@ -105,7 +105,7 @@ async def test_runtime_selects_profile_without_changing_execution_flow() -> None
         context_provider=TurnContextProvider(repository=repo),
         prompt_assembler=PromptAssembler(
             PromptCatalog(
-                persona="You are Jasi.",
+                self_model="You are Jasi.",
                 profiles={
                     "passive": "Handle a passive conversation.",
                     "scheduled": "Execute a scheduled instruction.",

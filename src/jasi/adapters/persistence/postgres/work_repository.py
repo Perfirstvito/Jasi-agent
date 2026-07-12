@@ -483,16 +483,24 @@ class SQLAlchemyWorkRepository:
         session: AsyncSession,
         message: InboundMessage,
     ) -> int:
+        metadata = {
+            "last_external_user_id": message.external_user_id,
+            "memory_scope_key": str(message.metadata.get("memory_scope_key") or "").strip()
+            or f"{message.channel}:{message.external_user_id}",
+        }
+        insert_statement = pg_insert(Conversation).values(
+            channel=message.channel,
+            external_chat_id=message.external_chat_id,
+            meta=metadata,
+        )
         statement = (
-            pg_insert(Conversation)
-            .values(
-                channel=message.channel,
-                external_chat_id=message.external_chat_id,
-                meta={"last_external_user_id": message.external_user_id},
-            )
+            insert_statement
             .on_conflict_do_update(
                 index_elements=[Conversation.channel, Conversation.external_chat_id],
-                set_={"updated_at": datetime.now(UTC)},
+                set_={
+                    "metadata": Conversation.meta.concat(insert_statement.excluded.meta),
+                    "updated_at": datetime.now(UTC),
+                },
             )
             .returning(Conversation.id)
         )

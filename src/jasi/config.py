@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 
 
 class SettingsError(ValueError):
@@ -17,6 +20,7 @@ class Settings:
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
     prompt_dir: str = "prompts"
+    memory_scope_map: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     timezone: str = "Asia/Shanghai"
     model_timeout_seconds: float = 60.0
     telegram_poll_timeout_seconds: int = 30
@@ -77,6 +81,26 @@ def _allowed_user_ids() -> frozenset[int]:
     return frozenset(ids)
 
 
+def _memory_scope_map() -> Mapping[str, str]:
+    raw = os.environ.get("JASI_MEMORY_SCOPE_MAP", "").strip()
+    if not raw:
+        return MappingProxyType({})
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise SettingsError("JASI_MEMORY_SCOPE_MAP must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise SettingsError("JASI_MEMORY_SCOPE_MAP must be a JSON object")
+    mapping: dict[str, str] = {}
+    for identity, scope_key in payload.items():
+        identity = str(identity).strip()
+        scope_key = str(scope_key).strip()
+        if not identity or not scope_key:
+            raise SettingsError("JASI_MEMORY_SCOPE_MAP keys and values cannot be empty")
+        mapping[identity] = scope_key
+    return MappingProxyType(mapping)
+
+
 def load_settings() -> Settings:
     return Settings(
         database_url=_required("JASI_DATABASE_URL"),
@@ -86,6 +110,7 @@ def load_settings() -> Settings:
         telegram_bot_token=_required("JASI_TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_allowed_user_ids(),
         prompt_dir=os.environ.get("JASI_PROMPT_DIR", "prompts").strip() or "prompts",
+        memory_scope_map=_memory_scope_map(),
         timezone=os.environ.get("JASI_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
         model_timeout_seconds=_float("JASI_MODEL_TIMEOUT_SECONDS", 60.0),
         telegram_poll_timeout_seconds=_int("JASI_TELEGRAM_POLL_TIMEOUT_SECONDS", 30),

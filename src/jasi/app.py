@@ -135,6 +135,7 @@ async def run() -> None:
         service = PassiveIngressService(
             repository=work_repository,
             work_wakeup=work_wakeup,
+            memory_scope_map=settings.memory_scope_map,
         )
         schedule_wakeup = asyncio.Event()
         schedule_worker = ScheduleWorker(

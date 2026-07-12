@@ -48,9 +48,11 @@ async def test_passive_ingress_only_persists_and_wakes_work_worker() -> None:
     class IngressRepository:
         def __init__(self) -> None:
             self.calls = 0
+            self.messages: list[InboundMessage] = []
 
-        async def enqueue_passive(self, _message: InboundMessage):
+        async def enqueue_passive(self, message: InboundMessage):
             self.calls += 1
+            self.messages.append(message)
             return WorkEnqueueResult(work=queued.work, created=self.calls == 1)
 
     repository = IngressRepository()
@@ -61,7 +63,39 @@ async def test_passive_ingress_only_persists_and_wakes_work_worker() -> None:
     await service.handle(inbound())
 
     assert repository.calls == 2
+    assert repository.messages[0].metadata["memory_scope_key"] == "telegram:42"
     assert wakeup.is_set()
+
+
+@pytest.mark.asyncio
+async def test_passive_ingress_can_map_channels_to_a_shared_memory_scope() -> None:
+    class IngressRepository:
+        def __init__(self) -> None:
+            self.scope_keys: list[str] = []
+
+        async def enqueue_passive(self, message: InboundMessage):
+            self.scope_keys.append(message.metadata["memory_scope_key"])
+            return None
+
+    repository = IngressRepository()
+    service = PassiveIngressService(
+        repository=repository,
+        work_wakeup=asyncio.Event(),
+        memory_scope_map={"telegram:42": "owner", "feishu:ou_42": "owner"},
+    )
+
+    await service.handle(inbound())
+    await service.handle(
+        InboundMessage(
+            channel="feishu",
+            external_update_id="f-1",
+            external_chat_id="f-chat",
+            external_user_id="ou_42",
+            text="hello",
+        )
+    )
+
+    assert repository.scope_keys == ["owner", "owner"]
 
 
 @pytest.mark.asyncio

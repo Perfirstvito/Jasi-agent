@@ -30,16 +30,29 @@ def test_embedding_is_explicitly_optional(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert settings.memory_embedding_base_url is None
     assert settings.memory_embedding_api_key is None
+    assert settings.light_model_base_url == settings.openai_base_url
+    assert settings.light_model_api_key == settings.openai_api_key
+    assert settings.light_model == settings.openai_model
 
 
-def test_embedding_endpoint_can_reuse_chat_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_and_light_model_use_independent_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _base_environment(monkeypatch)
     monkeypatch.setenv("JASI_MEMORY_EMBEDDING_BASE_URL", "https://embedding.example/v1/")
+    monkeypatch.setenv("JASI_MEMORY_EMBEDDING_API_KEY", "embedding-secret")
+    monkeypatch.setenv("JASI_LIGHT_MODEL_BASE_URL", "https://light.example/v1/")
+    monkeypatch.setenv("JASI_LIGHT_MODEL_API_KEY", "light-secret")
+    monkeypatch.setenv("JASI_LIGHT_MODEL", "light-model")
 
     settings = load_settings()
 
     assert settings.memory_embedding_base_url == "https://embedding.example/v1"
-    assert settings.memory_embedding_api_key == "chat-secret"
+    assert settings.memory_embedding_api_key == "embedding-secret"
+    assert settings.memory_embedding_model == "text-embedding-v3"
+    assert settings.light_model_base_url == "https://light.example/v1"
+    assert settings.light_model_api_key == "light-secret"
+    assert settings.light_model == "light-model"
 
 
 def test_embedding_api_key_without_endpoint_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,6 +60,16 @@ def test_embedding_api_key_without_endpoint_is_rejected(monkeypatch: pytest.Monk
     monkeypatch.setenv("JASI_MEMORY_EMBEDDING_API_KEY", "embedding-secret")
 
     with pytest.raises(SettingsError, match="EMBEDDING_BASE_URL"):
+        load_settings()
+
+
+def test_partial_light_model_configuration_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _base_environment(monkeypatch)
+    monkeypatch.setenv("JASI_LIGHT_MODEL", "light-model")
+
+    with pytest.raises(SettingsError, match="must be configured together"):
         load_settings()
 
 

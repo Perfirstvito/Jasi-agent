@@ -36,6 +36,10 @@ class ModelMemoryReasoner:
         self._model_name = model_name
         self._timeout_seconds = timeout_seconds
 
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
     async def extract(
         self,
         messages: tuple[MemoryMessage, ...],

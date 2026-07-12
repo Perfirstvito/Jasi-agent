@@ -15,6 +15,7 @@ from jasi.domain.memory import (
     MemoryConsolidationBatch,
     MemoryJobRecord,
     MemoryMessage,
+    MemoryQueryVariant,
     MemoryRecordDraft,
     MemoryScopeRecord,
     MemorySearchHit,
@@ -128,6 +129,7 @@ async def test_memory_reasoner_runs_full_retrieval_reasoning_contract() -> None:
     assert await reasoner.rerank("Which database?", (hit,)) == ((7, 0.95),)
     assert await reasoner.sufficient("Which database?", (hit,)) is True
     assert len(model.requests) == 5
+    assert all(request.model == "memory-model" for request in model.requests)
 
 
 @pytest.mark.asyncio
@@ -319,13 +321,13 @@ async def test_memory_context_runs_hybrid_pipeline_and_audits_injected_hits(
     class Repository:
         def __init__(self) -> None:
             self.audit = None
-            self.searches = 0
+            self.searches = []
 
         async def resolve_scope(self, _conversation_id):
             return scope
 
-        async def search_records(self, **_kwargs):
-            self.searches += 1
+        async def search_records(self, **kwargs):
+            self.searches.append(kwargs)
             return [base_hit]
 
         async def record_retrieval(self, audit):
@@ -335,10 +337,16 @@ async def test_memory_context_runs_hybrid_pipeline_and_audits_injected_hits(
         model_name = "fake"
 
         async def embed(self, texts):
-            assert len(texts) == 2
-            return ((1.0, 0.0), (0.0, 1.0))
+            assert texts == (
+                "Which database did I choose?",
+                "Jasi database choice",
+                "The user selected a relational database for Jasi.",
+            )
+            return ((1.0, 0.0), (0.0, 1.0), (0.5, 0.5))
 
     class Reasoner:
+        model_name = "light-model"
+
         async def gate(self, _query):
             return True, "personal history"
 
@@ -372,8 +380,23 @@ async def test_memory_context_runs_hybrid_pipeline_and_audits_injected_hits(
     assert [item.kind for item in context] == ["stable_memory", "episodic_memory"]
     assert "concise answers" in context[0].content
     assert "PostgreSQL" in context[1].content
-    assert repository.searches == 3
+    assert [search["query_text"] for search in repository.searches] == [
+        "Which database did I choose?",
+        "Jasi database choice",
+        "The user selected a relational database for Jasi.",
+    ]
+    assert all(search["query_embedding"] is not None for search in repository.searches)
     assert repository.audit.gate_decision == "retrieve"
+    assert repository.audit.reasoning_model == "light-model"
+    assert [item.kind for item in repository.audit.query_variants] == [
+        "original",
+        "rewritten",
+        "hyde",
+    ]
+    assert repository.audit.query_variants[0].text == "Which database did I choose?"
+    assert repository.audit.query_variants[1].text == "Jasi database choice"
+    assert all(item.semantic for item in repository.audit.query_variants)
+    assert all(item.hit_record_ids == (7,) for item in repository.audit.query_variants)
     assert repository.audit.sufficient is True
     assert repository.audit.hits[0].injected is True
 
@@ -411,6 +434,8 @@ async def test_memory_context_uses_audited_lexical_pipeline_without_embeddings(
             self.audit = audit
 
     class Reasoner:
+        model_name = "light-model"
+
         async def gate(self, _query):
             return True, "prior choice"
 
@@ -445,6 +470,16 @@ async def test_memory_context_uses_audited_lexical_pipeline_without_embeddings(
     assert all(search["query_embedding"] is None for search in repository.searches)
     assert all(search["tiers"] == frozenset({"episodic"}) for search in repository.searches)
     assert repository.audit.hyde_text is None
+    assert [item.kind for item in repository.audit.query_variants] == [
+        "original",
+        "rewritten",
+    ]
+    assert [item.text for item in repository.audit.query_variants] == [
+        "Which local database did I select?",
+        "user local database choice",
+    ]
+    assert all(not item.semantic for item in repository.audit.query_variants)
+    assert all(item.lexical for item in repository.audit.query_variants)
     assert repository.audit.trace["retrieval_mode"] == "lexical"
     assert repository.audit.hits[0].injected is True
 
@@ -464,3 +499,72 @@ async def test_memory_context_uses_audited_lexical_pipeline_without_embeddings(
         == ()
     )
     assert repository.audit.hits[0].injected is False
+
+
+@pytest.mark.asyncio
+async def test_memory_gate_skip_still_audits_the_exact_user_utterance(
+    tmp_path: Path,
+) -> None:
+    scope = MemoryScopeRecord(id=1, scope_key="owner", directory_name="scope-1")
+    store = MarkdownMemoryStore(tmp_path)
+    store.ensure_workspace(scope.directory_name)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.audit = None
+
+        async def resolve_scope(self, _conversation_id):
+            return scope
+
+        async def search_records(self, **_kwargs):
+            raise AssertionError("a skipped gate must not search")
+
+        async def record_retrieval(self, audit):
+            self.audit = audit
+
+    class Reasoner:
+        model_name = "light-model"
+
+        async def gate(self, _query):
+            return False, "no personal context needed"
+
+        async def rewrite(self, _query):
+            raise AssertionError("a skipped gate must not rewrite")
+
+        async def hyde(self, _query):
+            raise AssertionError("a skipped gate must not run HyDE")
+
+        async def rerank(self, _query, _hits):
+            raise AssertionError("a skipped gate must not rerank")
+
+        async def sufficient(self, _query, _hits):
+            raise AssertionError("a skipped gate must not check sufficiency")
+
+    repository = Repository()
+    service = MemoryContextService(
+        repository=repository,
+        store=store,
+        embedding=None,
+        reasoner=Reasoner(),
+    )
+    utterance = "请把这一句话的标点、日期 2026-07-12 和 SQLite 细节都保留下来。"
+
+    assert (
+        await service.load_context(
+            conversation_id=1,
+            query_text=utterance,
+            turn_id=13,
+        )
+        == ()
+    )
+    assert repository.audit.query == utterance
+    assert repository.audit.rewritten_query is None
+    assert repository.audit.gate_decision == "skip"
+    assert repository.audit.query_variants == (
+        MemoryQueryVariant(
+            kind="original",
+            text=utterance,
+            semantic=False,
+            lexical=False,
+        ),
+    )

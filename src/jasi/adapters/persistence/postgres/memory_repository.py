@@ -28,6 +28,7 @@ from jasi.domain.memory import (
     MemoryJobLeaseLost,
     MemoryJobRecord,
     MemoryMessage,
+    MemoryQueryVariant,
     MemoryRecordDraft,
     MemoryRetrievalAudit,
     MemoryScopeRecord,
@@ -229,6 +230,8 @@ class SQLAlchemyMemoryRepository:
                     hyde_text=audit.hyde_text,
                     gate_decision=audit.gate_decision,
                     sufficient=audit.sufficient,
+                    reasoning_model=audit.reasoning_model,
+                    query_variants=[_query_variant(item) for item in audit.query_variants],
                     trace=audit.trace,
                 )
                 .on_conflict_do_update(
@@ -240,6 +243,8 @@ class SQLAlchemyMemoryRepository:
                         "hyde_text": audit.hyde_text,
                         "gate_decision": audit.gate_decision,
                         "sufficient": audit.sufficient,
+                        "reasoning_model": audit.reasoning_model,
+                        "query_variants": [_query_variant(item) for item in audit.query_variants],
                         "trace": audit.trace,
                     },
                 )
@@ -775,6 +780,16 @@ def _document_state(row: MemoryDocument) -> MemoryDocumentState:
         indexed_hash=row.indexed_hash,
         version=row.version,
     )
+
+
+def _query_variant(variant: MemoryQueryVariant) -> dict[str, object]:
+    return {
+        "kind": variant.kind,
+        "text": variant.text,
+        "semantic": variant.semantic,
+        "lexical": variant.lexical,
+        "hit_record_ids": list(variant.hit_record_ids),
+    }
 
 
 def _validate_records(records: tuple[MemoryRecordDraft, ...]) -> None:

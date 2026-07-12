@@ -17,15 +17,18 @@ class Settings:
     openai_base_url: str
     openai_api_key: str
     openai_model: str
+    light_model_base_url: str
+    light_model_api_key: str
+    light_model: str
     telegram_bot_token: str
     telegram_allowed_user_ids: frozenset[int]
     prompt_dir: str = "prompts"
     memory_scope_map: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     memory_root: str = "workspace/memory"
-    memory_model: str = ""
+    light_model_timeout_seconds: float = 30.0
     memory_embedding_base_url: str | None = None
     memory_embedding_api_key: str | None = None
-    memory_embedding_model: str = "text-embedding-3-small"
+    memory_embedding_model: str = "text-embedding-v3"
     memory_embedding_timeout_seconds: float = 30.0
     memory_consolidation_batch_messages: int = 6
     memory_job_batch_size: int = 4
@@ -119,6 +122,21 @@ def load_settings() -> Settings:
     openai_base_url = _required("JASI_OPENAI_BASE_URL").rstrip("/")
     openai_api_key = _required("JASI_OPENAI_API_KEY")
     openai_model = _required("JASI_OPENAI_MODEL")
+    light_model_base_url = os.environ.get("JASI_LIGHT_MODEL_BASE_URL", "").strip()
+    light_model_api_key = os.environ.get("JASI_LIGHT_MODEL_API_KEY", "").strip()
+    light_model = os.environ.get("JASI_LIGHT_MODEL", "").strip()
+    configured_light_values = (light_model_base_url, light_model_api_key, light_model)
+    if any(configured_light_values) and not all(configured_light_values):
+        raise SettingsError(
+            "JASI_LIGHT_MODEL_BASE_URL, JASI_LIGHT_MODEL_API_KEY, and "
+            "JASI_LIGHT_MODEL must be configured together"
+        )
+    if not any(configured_light_values):
+        light_model_base_url = openai_base_url
+        light_model_api_key = openai_api_key
+        light_model = openai_model
+    light_model_base_url = light_model_base_url.rstrip("/")
+    light_model_timeout = _float("JASI_LIGHT_MODEL_TIMEOUT_SECONDS", 30.0)
     consolidation_batch = _int("JASI_MEMORY_CONSOLIDATION_BATCH_MESSAGES", 6)
     if not 4 <= consolidation_batch <= 8:
         raise SettingsError("JASI_MEMORY_CONSOLIDATION_BATCH_MESSAGES must be between 4 and 8")
@@ -132,6 +150,7 @@ def load_settings() -> Settings:
     memory_max_context_chars = _int("JASI_MEMORY_MAX_CONTEXT_CHARS", 6000)
     positive_memory_values = {
         "JASI_MEMORY_EMBEDDING_TIMEOUT_SECONDS": embedding_timeout,
+        "JASI_LIGHT_MODEL_TIMEOUT_SECONDS": light_model_timeout,
         "JASI_MEMORY_JOB_BATCH_SIZE": memory_job_batch_size,
         "JASI_MEMORY_JOB_LEASE_SECONDS": memory_job_lease_seconds,
         "JASI_MEMORY_RECONCILE_SECONDS": memory_reconcile_seconds,
@@ -151,32 +170,35 @@ def load_settings() -> Settings:
         raise SettingsError("JASI_MEMORY_SCORE_THRESHOLD must be between 0 and 1")
     embedding_base_url = os.environ.get("JASI_MEMORY_EMBEDDING_BASE_URL", "").strip()
     embedding_api_key = os.environ.get("JASI_MEMORY_EMBEDDING_API_KEY", "").strip()
-    if embedding_api_key and not embedding_base_url:
+    if bool(embedding_api_key) != bool(embedding_base_url):
         raise SettingsError(
-            "JASI_MEMORY_EMBEDDING_BASE_URL is required when an embedding API key is set"
+            "JASI_MEMORY_EMBEDDING_BASE_URL and JASI_MEMORY_EMBEDDING_API_KEY "
+            "must be configured together"
         )
     if embedding_base_url:
         embedding_base_url = embedding_base_url.rstrip("/")
-        embedding_api_key = embedding_api_key or openai_api_key
     return Settings(
         database_url=_required("JASI_DATABASE_URL"),
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
+        light_model_base_url=light_model_base_url,
+        light_model_api_key=light_model_api_key,
+        light_model=light_model,
         telegram_bot_token=_required("JASI_TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_ids=_allowed_user_ids(),
         prompt_dir=os.environ.get("JASI_PROMPT_DIR", "prompts").strip() or "prompts",
         memory_scope_map=_memory_scope_map(),
         memory_root=os.environ.get("JASI_MEMORY_ROOT", "workspace/memory").strip()
         or "workspace/memory",
-        memory_model=os.environ.get("JASI_MEMORY_MODEL", openai_model).strip() or openai_model,
+        light_model_timeout_seconds=light_model_timeout,
         memory_embedding_base_url=embedding_base_url or None,
         memory_embedding_api_key=embedding_api_key or None,
         memory_embedding_model=os.environ.get(
             "JASI_MEMORY_EMBEDDING_MODEL",
-            "text-embedding-3-small",
+            "text-embedding-v3",
         ).strip()
-        or "text-embedding-3-small",
+        or "text-embedding-v3",
         memory_embedding_timeout_seconds=embedding_timeout,
         memory_consolidation_batch_messages=consolidation_batch,
         memory_job_batch_size=memory_job_batch_size,

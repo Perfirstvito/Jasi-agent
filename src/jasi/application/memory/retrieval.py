@@ -2,16 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from jasi.domain.context import ContextItem
-from jasi.domain.memory import MemoryRetrievalAudit, MemorySearchHit
+from jasi.domain.memory import (
+    MemoryQueryKind,
+    MemoryQueryVariant,
+    MemoryRetrievalAudit,
+    MemorySearchHit,
+)
 from jasi.ports.embedding import EmbeddingPort
 from jasi.ports.memory import MemoryDocumentStorePort, MemoryIndexRepositoryPort
 from jasi.ports.memory_reasoning import MemoryRetrievalReasonerPort
 
 logger = logging.getLogger(__name__)
 _RECALLED_TIERS = frozenset({"episodic"})
+
+
+@dataclass(frozen=True)
+class _SearchQuery:
+    kind: MemoryQueryKind
+    text: str
+    embedding: tuple[float, ...] | None = None
+    search: bool = True
 
 
 class MemoryContextService:
@@ -86,12 +99,24 @@ class MemoryContextService:
         rewritten: str | None = None
         hyde_text: str | None = None
         ranked: tuple[MemorySearchHit, ...] = ()
+        query_variants = (
+            MemoryQueryVariant(
+                kind="original",
+                text=query_text,
+                semantic=False,
+                lexical=False,
+            ),
+        )
         sufficient = False
         if should_retrieve:
-            rewritten, hyde_text, ranked, sufficient, retrieval_trace = await self._retrieve(
-                scope.id,
-                query_text,
-            )
+            (
+                rewritten,
+                hyde_text,
+                ranked,
+                sufficient,
+                retrieval_trace,
+                query_variants,
+            ) = await self._retrieve(scope.id, query_text)
             trace.update(retrieval_trace)
         else:
             gate_decision = "skip"
@@ -130,6 +155,8 @@ class MemoryContextService:
                     hyde_text=hyde_text,
                     gate_decision=gate_decision,
                     sufficient=sufficient,
+                    reasoning_model=self._reasoner.model_name,
+                    query_variants=query_variants,
                     trace=trace,
                     hits=audited_hits,
                 )
@@ -142,7 +169,14 @@ class MemoryContextService:
         self,
         scope_id: int,
         query_text: str,
-    ) -> tuple[str, str | None, tuple[MemorySearchHit, ...], bool, dict[str, object]]:
+    ) -> tuple[
+        str,
+        str | None,
+        tuple[MemorySearchHit, ...],
+        bool,
+        dict[str, object],
+        tuple[MemoryQueryVariant, ...],
+    ]:
         trace: dict[str, object] = {}
         rewritten, rewrite_error = await _fallback_text(
             self._reasoner.rewrite(query_text),
@@ -152,8 +186,8 @@ class MemoryContextService:
             trace["rewrite_error"] = rewrite_error
 
         hyde_text: str | None = None
-        rewritten_vector: tuple[float, ...] | None = None
-        hyde_vector: tuple[float, ...] | None = None
+        hyde_usable = False
+        embeddings: dict[str, tuple[float, ...]] = {}
         if self._embedding is not None:
             hyde_text, hyde_error = await _fallback_text(
                 self._reasoner.hyde(query_text),
@@ -161,48 +195,70 @@ class MemoryContextService:
             )
             if hyde_error:
                 trace["hyde_error"] = hyde_error
+            else:
+                hyde_usable = True
+            embedding_texts = [query_text]
+            if rewrite_error is None and rewritten != query_text:
+                embedding_texts.append(rewritten)
+            if hyde_usable and hyde_text not in embedding_texts:
+                embedding_texts.append(hyde_text)
             try:
-                rewritten_vector, hyde_vector = await self._embedding.embed((rewritten, hyde_text))
+                vectors = await self._embedding.embed(tuple(embedding_texts))
+                embeddings = dict(zip(embedding_texts, vectors, strict=True))
+                trace["retrieval_mode"] = "hybrid"
             except Exception as exc:
                 logger.warning("memory query embedding failed; using lexical search: %s", exc)
                 trace["embedding_error"] = exc.__class__.__name__
-                rewritten_vector = None
-                hyde_vector = None
+                trace["retrieval_mode"] = "lexical_fallback"
         else:
             trace["retrieval_mode"] = "lexical"
 
-        searches = [
-            self._repository.search_records(
-                scope_id=scope_id,
-                query_text=rewritten,
-                query_embedding=rewritten_vector,
-                limit=self._search_limit,
-                tiers=_RECALLED_TIERS,
+        plans = [
+            _SearchQuery(
+                kind="original",
+                text=query_text,
+                embedding=embeddings.get(query_text),
             ),
-            self._repository.search_records(
-                scope_id=scope_id,
-                query_text=query_text,
-                query_embedding=None,
-                limit=self._search_limit,
-                tiers=_RECALLED_TIERS,
+            _SearchQuery(
+                kind="rewritten",
+                text=rewritten,
+                embedding=embeddings.get(rewritten),
+                search=rewrite_error is None and rewritten != query_text,
             ),
         ]
-        if hyde_vector is not None and hyde_text is not None:
-            searches.append(
-                self._repository.search_records(
-                    scope_id=scope_id,
-                    query_text=hyde_text,
-                    query_embedding=hyde_vector,
-                    limit=self._search_limit,
-                    tiers=_RECALLED_TIERS,
+        if hyde_text is not None:
+            plans.append(
+                _SearchQuery(
+                    kind="hyde",
+                    text=hyde_text,
+                    embedding=embeddings.get(hyde_text),
+                    search=hyde_usable and hyde_text in embeddings,
                 )
             )
+        searched_plans = [plan for plan in plans if plan.search]
         try:
-            result_sets = await asyncio.gather(*searches)
+            result_sets = await asyncio.gather(
+                *(
+                    self._repository.search_records(
+                        scope_id=scope_id,
+                        query_text=plan.text,
+                        query_embedding=plan.embedding,
+                        limit=self._search_limit,
+                        tiers=_RECALLED_TIERS,
+                    )
+                    for plan in searched_plans
+                )
+            )
         except Exception as exc:
             logger.warning("memory search failed: %s", exc)
             trace["search_error"] = exc.__class__.__name__
-            return rewritten, hyde_text, (), False, trace
+            query_variants = _query_variants(plans, {})
+            return rewritten, hyde_text, (), False, trace, query_variants
+
+        results_by_kind = dict(
+            zip((plan.kind for plan in searched_plans), result_sets, strict=True)
+        )
+        query_variants = _query_variants(plans, results_by_kind)
 
         merged = _merge_hits(result_sets)
         candidates = tuple(
@@ -211,7 +267,7 @@ class MemoryContextService:
             if hit.final_score >= self._score_threshold
         )[: self._search_limit]
         if not candidates:
-            return rewritten, hyde_text, (), False, trace
+            return rewritten, hyde_text, (), False, trace, query_variants
 
         try:
             rerank_scores = dict(await self._reasoner.rerank(query_text, candidates))
@@ -241,7 +297,7 @@ class MemoryContextService:
             sufficient = bool(candidates)
             trace["sufficiency_error"] = exc.__class__.__name__
         trace["candidate_count"] = len(candidates)
-        return rewritten, hyde_text, candidates, sufficient, trace
+        return rewritten, hyde_text, candidates, sufficient, trace, query_variants
 
 
 async def _fallback_text(awaitable, fallback: str) -> tuple[str, str | None]:
@@ -269,6 +325,22 @@ def _merge_hits(result_sets: list[list[MemorySearchHit]]) -> dict[int, MemorySea
                 final_score=_hybrid_score(semantic, lexical),
             )
     return merged
+
+
+def _query_variants(
+    plans: list[_SearchQuery],
+    results_by_kind: dict[MemoryQueryKind, list[MemorySearchHit]],
+) -> tuple[MemoryQueryVariant, ...]:
+    return tuple(
+        MemoryQueryVariant(
+            kind=plan.kind,
+            text=plan.text,
+            semantic=plan.search and plan.embedding is not None,
+            lexical=plan.search,
+            hit_record_ids=tuple(hit.record_id for hit in results_by_kind.get(plan.kind, ())),
+        )
+        for plan in plans
+    )
 
 
 def _hybrid_score(semantic: float, lexical: float) -> float:

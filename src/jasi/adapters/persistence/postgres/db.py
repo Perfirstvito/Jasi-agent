@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-EXPECTED_ALEMBIC_REVISION = "0010_memory_job_batching"
+EXPECTED_ALEMBIC_REVISION = "0012_memory_query_variants"
 
 
 class DatabaseNotReady(RuntimeError):

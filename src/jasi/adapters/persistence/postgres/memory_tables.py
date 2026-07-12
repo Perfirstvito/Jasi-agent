@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from jasi.adapters.persistence.postgres.db import Base
 
-EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_DIMENSIONS = 1024
 
 
 class MemoryScope(Base):
@@ -161,6 +161,10 @@ class MemoryRetrieval(Base):
     gate_decision: Mapped[str] = mapped_column(Text, nullable=False)
     sufficient: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sql_text("false")
+    )
+    reasoning_model: Mapped[str] = mapped_column(Text, nullable=False)
+    query_variants: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=sql_text("'[]'::jsonb")
     )
     trace: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=sql_text("'{}'::jsonb")

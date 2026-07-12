@@ -28,6 +28,9 @@ class MemoryMaintenanceReasonerPort(Protocol):
 
 
 class MemoryRetrievalReasonerPort(Protocol):
+    @property
+    def model_name(self) -> str: ...
+
     async def gate(self, query: str) -> tuple[bool, str]: ...
 
     async def rewrite(self, query: str) -> str: ...

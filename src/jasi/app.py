@@ -101,6 +101,11 @@ async def run() -> None:
             api_key=settings.openai_api_key,
             timeout_seconds=settings.model_timeout_seconds,
         )
+        light_model = OpenAICompatibleModel(
+            base_url=settings.light_model_base_url,
+            api_key=settings.light_model_api_key,
+            timeout_seconds=settings.light_model_timeout_seconds,
+        )
         memory_store = MarkdownMemoryStore(Path(settings.memory_root))
         if settings.memory_embedding_base_url is not None:
             if settings.memory_embedding_api_key is None:
@@ -113,9 +118,15 @@ async def run() -> None:
                 timeout_seconds=settings.memory_embedding_timeout_seconds,
             )
         memory_reasoner = ModelMemoryReasoner(
-            model=model,
-            model_name=settings.memory_model,
-            timeout_seconds=settings.model_timeout_seconds,
+            model=light_model,
+            model_name=settings.light_model,
+            timeout_seconds=settings.light_model_timeout_seconds,
+        )
+        logger.info(
+            "model routing configured runtime=%s light=%s embedding=%s",
+            settings.openai_model,
+            settings.light_model,
+            settings.memory_embedding_model if memory_embedding is not None else "disabled",
         )
         memory_indexer = MarkdownMemoryIndexer(
             store=memory_store,

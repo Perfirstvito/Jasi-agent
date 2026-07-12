@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 MemoryTier = Literal["stable", "episodic"]
+MemoryQueryKind = Literal["original", "rewritten", "hyde"]
 MemoryDocumentName = Literal[
     "MEMORY.md",
     "HISTORY.md",
@@ -98,6 +99,19 @@ class MemorySearchHit:
 
 
 @dataclass(frozen=True)
+class MemoryQueryVariant:
+    kind: MemoryQueryKind
+    text: str
+    semantic: bool
+    lexical: bool
+    hit_record_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValueError("memory query variant text cannot be empty")
+
+
+@dataclass(frozen=True)
 class MemoryRetrievalAudit:
     turn_id: int
     scope_id: int
@@ -106,6 +120,8 @@ class MemoryRetrievalAudit:
     hyde_text: str | None
     gate_decision: Literal["retrieve", "skip", "fallback"]
     sufficient: bool
+    reasoning_model: str
+    query_variants: tuple[MemoryQueryVariant, ...]
     trace: dict[str, Any]
     hits: tuple[MemorySearchHit, ...]
 

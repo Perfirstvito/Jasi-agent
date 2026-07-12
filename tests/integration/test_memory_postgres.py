@@ -44,7 +44,7 @@ async def test_alembic_upgrades_empty_database_with_memory_extensions() -> None:
         async with target_engine.connect() as connection:
             assert (
                 await connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0010_memory_job_batching"
+                == "0012_memory_query_variants"
             )
             extensions = set(
                 (await connection.execute(text("SELECT extname FROM pg_extension"))).scalars()
@@ -52,6 +52,29 @@ async def test_alembic_upgrades_empty_database_with_memory_extensions() -> None:
             assert {"vector", "pg_trgm"} <= extensions
             assert await connection.scalar(text("SELECT to_regclass('memory_records')"))
             assert await connection.scalar(text("SELECT to_regclass('memory_jobs')"))
+            assert (
+                await connection.scalar(
+                    text(
+                        "SELECT format_type(attribute.atttypid, attribute.atttypmod) "
+                        "FROM pg_attribute AS attribute "
+                        "JOIN pg_class AS relation ON relation.oid = attribute.attrelid "
+                        "WHERE relation.relname = 'memory_records' "
+                        "AND attribute.attname = 'embedding'"
+                    )
+                )
+                == "vector(1024)"
+            )
+            retrieval_columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = 'memory_retrievals'"
+                        )
+                    )
+                ).scalars()
+            )
+            assert {"reasoning_model", "query_variants"} <= retrieval_columns
     finally:
         if previous_database_url is None:
             os.environ.pop("JASI_DATABASE_URL", None)
@@ -96,6 +119,7 @@ async def test_memory_scope_index_evidence_search_and_retrieval_audit(tmp_path: 
         MemoryRetrievalHit,
     )
     from jasi.domain.memory import (
+        MemoryQueryVariant,
         MemoryRecordDraft,
         MemoryRetrievalAudit,
         content_hash,
@@ -259,6 +283,23 @@ async def test_memory_scope_index_evidence_search_and_retrieval_audit(tmp_path: 
                 hyde_text="The user prefers a durable relational database.",
                 gate_decision="retrieve",
                 sufficient=True,
+                reasoning_model="test-light-model",
+                query_variants=(
+                    MemoryQueryVariant(
+                        kind="original",
+                        text="What database do I prefer?",
+                        semantic=True,
+                        lexical=True,
+                        hit_record_ids=(hits[0].record_id,),
+                    ),
+                    MemoryQueryVariant(
+                        kind="rewritten",
+                        text="user database preference",
+                        semantic=True,
+                        lexical=True,
+                        hit_record_ids=(hits[0].record_id,),
+                    ),
+                ),
                 trace={"stages": ["rewrite", "hyde", "search", "rerank"]},
                 hits=(injected,),
             )
@@ -282,6 +323,17 @@ async def test_memory_scope_index_evidence_search_and_retrieval_audit(tmp_path: 
                 )
                 == 1
             )
+            retrieval = (
+                await session.scalars(
+                    select(MemoryRetrieval).where(MemoryRetrieval.turn_id == turn_id)
+                )
+            ).one()
+            assert retrieval.reasoning_model == "test-light-model"
+            assert [item["kind"] for item in retrieval.query_variants] == [
+                "original",
+                "rewritten",
+            ]
+            assert retrieval.query_variants[0]["text"] == "What database do I prefer?"
             audit_hit = (
                 await session.scalars(
                     select(MemoryRetrievalHit)

@@ -11,6 +11,8 @@ from jasi.adapters.channels.telegram import (
     TelegramOutboundPolicy,
 )
 from jasi.adapters.llm.openai_compatible import OpenAICompatibleModel
+from jasi.adapters.llm.openai_compatible_embedding import OpenAICompatibleEmbedding
+from jasi.adapters.persistence.markdown.memory_store import MarkdownMemoryStore
 from jasi.adapters.persistence.postgres.db import (
     check_database_ready,
     create_engine,
@@ -20,6 +22,10 @@ from jasi.adapters.persistence.postgres.effect_repository import SQLAlchemyEffec
 from jasi.adapters.persistence.postgres.initiative_repository import (
     SQLAlchemyInitiativeRepository,
 )
+from jasi.adapters.persistence.postgres.memory_repository import (
+    SQLAlchemyMemoryRepository,
+)
+from jasi.adapters.persistence.postgres.memory_tables import EMBEDDING_DIMENSIONS
 from jasi.adapters.persistence.postgres.repository import SQLAlchemyRepository
 from jasi.adapters.persistence.postgres.schedule_repository import SQLAlchemyScheduleRepository
 from jasi.adapters.persistence.postgres.source_repository import SQLAlchemySourceRepository
@@ -28,6 +34,10 @@ from jasi.application.agent_work import AgentWorkHandler
 from jasi.application.context import TurnContextProvider
 from jasi.application.direct_work import DirectWorkHandler
 from jasi.application.effect import EffectDispatcher, EffectWorker
+from jasi.application.memory.indexing import MarkdownMemoryIndexer
+from jasi.application.memory.maintenance import MemoryConsolidator, MemoryWorker
+from jasi.application.memory.reasoning import ModelMemoryReasoner
+from jasi.application.memory.retrieval import MemoryContextService
 from jasi.application.outbox import OutboxDispatcher, OutboxWorker
 from jasi.application.passive_service import PassiveIngressService
 from jasi.application.schedule import ScheduleWorker
@@ -57,6 +67,7 @@ async def run() -> None:
 
     configure_logging(settings.log_level)
     engine = create_engine(settings.database_url)
+    memory_embedding: OpenAICompatibleEmbedding | None = None
     try:
         await check_database_ready(engine)
 
@@ -67,14 +78,17 @@ async def run() -> None:
         source_repository = SQLAlchemySourceRepository(session_factory)
         initiative_repository = SQLAlchemyInitiativeRepository(session_factory)
         effect_repository = SQLAlchemyEffectRepository(session_factory)
+        memory_repository = SQLAlchemyMemoryRepository(session_factory)
         channel = TelegramBotClient(
             bot_token=settings.telegram_bot_token,
             request_timeout_seconds=30,
         )
         outbox_wakeup = asyncio.Event()
+        memory_wakeup = asyncio.Event()
         outbox_dispatcher = OutboxDispatcher(
             repository=repository,
             channels={"telegram": channel},
+            delivery_wakeup=memory_wakeup,
         )
         outbox_worker = OutboxWorker(
             repository=repository,
@@ -86,6 +100,55 @@ async def run() -> None:
             base_url=settings.openai_base_url,
             api_key=settings.openai_api_key,
             timeout_seconds=settings.model_timeout_seconds,
+        )
+        memory_store = MarkdownMemoryStore(Path(settings.memory_root))
+        if settings.memory_embedding_base_url is not None:
+            if settings.memory_embedding_api_key is None:
+                raise SettingsError("memory embedding API key is missing")
+            memory_embedding = OpenAICompatibleEmbedding(
+                base_url=settings.memory_embedding_base_url,
+                api_key=settings.memory_embedding_api_key,
+                model=settings.memory_embedding_model,
+                dimensions=EMBEDDING_DIMENSIONS,
+                timeout_seconds=settings.memory_embedding_timeout_seconds,
+            )
+        memory_reasoner = ModelMemoryReasoner(
+            model=model,
+            model_name=settings.memory_model,
+            timeout_seconds=settings.model_timeout_seconds,
+        )
+        memory_indexer = MarkdownMemoryIndexer(
+            store=memory_store,
+            repository=memory_repository,
+            embedding=memory_embedding,
+        )
+        memory_context = MemoryContextService(
+            repository=memory_repository,
+            store=memory_store,
+            embedding=memory_embedding,
+            reasoner=memory_reasoner,
+            search_limit=settings.memory_search_limit,
+            inject_limit=settings.memory_inject_limit,
+            score_threshold=settings.memory_score_threshold,
+            max_context_chars=settings.memory_max_context_chars,
+        )
+        memory_worker = MemoryWorker(
+            repository=memory_repository,
+            index_repository=memory_repository,
+            store=memory_store,
+            indexer=memory_indexer,
+            consolidator=MemoryConsolidator(
+                store=memory_store,
+                repository=memory_repository,
+                indexer=memory_indexer,
+                reasoner=memory_reasoner,
+                history_keep_count=PASSIVE_PROFILE.history_limit,
+            ),
+            wakeup=memory_wakeup,
+            batch_size=settings.memory_job_batch_size,
+            consolidation_batch_messages=settings.memory_consolidation_batch_messages,
+            lease_seconds=settings.memory_job_lease_seconds,
+            reconcile_seconds=settings.memory_reconcile_seconds,
         )
         tools = ToolRegistry([get_current_time_tool])
         prompt_catalog = PromptCatalog.load(
@@ -101,7 +164,10 @@ async def run() -> None:
             },
             model=model,
             repository=repository,
-            context_provider=TurnContextProvider(repository=repository),
+            context_provider=TurnContextProvider(
+                repository=repository,
+                memory=memory_context,
+            ),
             prompt_assembler=PromptAssembler(prompt_catalog),
             tools=tools,
             model_name=settings.openai_model,
@@ -187,6 +253,7 @@ async def run() -> None:
         stop_event = asyncio.Event()
         _install_signal_handlers(stop_event)
         worker_tasks = [
+            asyncio.create_task(memory_worker.run(stop_event), name="jasi-memory-worker"),
             asyncio.create_task(effect_worker.run(stop_event), name="jasi-effect-worker"),
             asyncio.create_task(source_worker.run(stop_event), name="jasi-source-worker"),
             asyncio.create_task(
@@ -209,11 +276,14 @@ async def run() -> None:
             schedule_wakeup.set()
             work_wakeup.set()
             outbox_wakeup.set()
+            memory_wakeup.set()
             await asyncio.gather(*worker_tasks)
     except Exception as exc:
         logger.exception("jasi failed to start or run")
         raise SystemExit(str(exc)) from exc
     finally:
+        if memory_embedding is not None:
+            await memory_embedding.aclose()
         await engine.dispose()
 
 

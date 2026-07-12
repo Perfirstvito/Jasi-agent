@@ -17,9 +17,11 @@ class OutboxDispatcher:
         *,
         repository: OutboxRepositoryPort,
         channels: Mapping[str, ChannelPort],
+        delivery_wakeup: asyncio.Event | None = None,
     ) -> None:
         self._repository = repository
         self._channels = dict(channels)
+        self._delivery_wakeup = delivery_wakeup
 
     async def deliver(self, record: OutboxRecord) -> None:
         channel = self._channels.get(record.channel)
@@ -51,6 +53,8 @@ class OutboxDispatcher:
 
         if result.success:
             await self._repository.mark_outbox_sent(record.id, result.external_message_id)
+            if self._delivery_wakeup is not None:
+                self._delivery_wakeup.set()
             return
 
         await self._repository.mark_outbox_failed_attempt(

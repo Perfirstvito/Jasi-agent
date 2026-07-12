@@ -16,6 +16,10 @@ from jasi.adapters.persistence.postgres.db import (
     Turn,
     WorkItem,
 )
+from jasi.adapters.persistence.postgres.memory_repository import (
+    ensure_conversation_memory_scope,
+)
+from jasi.adapters.persistence.postgres.memory_tables import MemoryJob
 from jasi.domain.models import ConversationRecord, MessageRecord, OutboxRecord
 from jasi.runtime.models import ToolExecutionRecord, TurnResult, TurnStart, Usage
 
@@ -52,12 +56,7 @@ class SQLAlchemyRepository:
             ]
             if before_sequence is not None:
                 filters.append(Message.sequence < before_sequence)
-            stmt = (
-                select(Message)
-                .where(*filters)
-                .order_by(Message.sequence.desc())
-                .limit(limit)
-            )
+            stmt = select(Message).where(*filters).order_by(Message.sequence.desc()).limit(limit)
             rows = list((await session.scalars(stmt)).all())
             return [_message_record(row) for row in reversed(rows)]
 
@@ -72,9 +71,7 @@ class SQLAlchemyRepository:
         async with self._session_factory.begin() as session:
             row = (
                 await session.scalars(
-                    select(Turn)
-                    .where(Turn.work_item_id == work_id)
-                    .with_for_update()
+                    select(Turn).where(Turn.work_item_id == work_id).with_for_update()
                 )
             ).one_or_none()
             if row is not None and row.status in {"succeeded", "failed"}:
@@ -222,11 +219,10 @@ class SQLAlchemyRepository:
                 )
             )
             if remaining == 0:
-                await session.execute(
-                    update(Message)
-                    .where(Message.id == row.message_id)
-                    .values(delivery_status="sent")
-                )
+                message = await session.get(Message, row.message_id)
+                if message is None:
+                    raise RuntimeError("outbox references a missing message")
+                message.delivery_status = "sent"
                 work = (
                     await session.scalars(
                         select(WorkItem).where(WorkItem.output_message_id == row.message_id)
@@ -252,6 +248,28 @@ class SQLAlchemyRepository:
                             },
                         )
                     )
+                    if work.kind == "passive" and message.origin == "model":
+                        conversation = await session.get(Conversation, work.conversation_id)
+                        if conversation is None:
+                            raise RuntimeError("delivered work references a missing conversation")
+                        scope = await ensure_conversation_memory_scope(session, conversation)
+                        await session.execute(
+                            pg_insert(MemoryJob)
+                            .values(
+                                scope_id=scope.id,
+                                conversation_id=work.conversation_id,
+                                kind="consolidate",
+                                dedupe_key=f"delivery:{row.message_id}",
+                                trigger_message_id=row.message_id,
+                                status="pending",
+                                payload={
+                                    "work_id": work.id,
+                                    "turn_id": message.turn_id,
+                                    "eligible_message_count": 2,
+                                },
+                            )
+                            .on_conflict_do_nothing(index_elements=[MemoryJob.dedupe_key])
+                        )
 
     async def mark_outbox_failed_attempt(self, outbox_id: int, error: str, retryable: bool) -> None:
         async with self._session_factory.begin() as session:
@@ -301,6 +319,7 @@ class SQLAlchemyRepository:
         if row is None:
             raise KeyError(f"outbox message not found: {outbox_id}")
         return row
+
 
 def _conversation_record(row: Conversation) -> ConversationRecord:
     return ConversationRecord(

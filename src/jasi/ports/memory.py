@@ -5,6 +5,8 @@ from typing import Protocol
 
 from jasi.domain.context import ContextItem
 from jasi.domain.memory import (
+    MemoryConsolidationBatch,
+    MemoryDocumentName,
     MemoryDocumentSnapshot,
     MemoryDocumentState,
     MemoryJobRecord,
@@ -12,7 +14,23 @@ from jasi.domain.memory import (
     MemoryRetrievalAudit,
     MemoryScopeRecord,
     MemorySearchHit,
+    MemoryWorkspaceSnapshot,
 )
+
+
+class MemoryDocumentStorePort(Protocol):
+    def ensure_workspace(self, scope_directory: str) -> MemoryWorkspaceSnapshot: ...
+
+    def read_workspace(self, scope_directory: str) -> MemoryWorkspaceSnapshot: ...
+
+    def write_document(
+        self,
+        scope_directory: str,
+        name: MemoryDocumentName,
+        content: str,
+        *,
+        expected_hash: str | None = None,
+    ) -> MemoryDocumentSnapshot: ...
 
 
 class MemoryContextPort(Protocol):
@@ -68,6 +86,15 @@ class MemoryJobRepositoryPort(Protocol):
         consolidation_batch_messages: int,
         now: datetime,
     ) -> list[MemoryJobRecord]: ...
+
+    async def load_consolidation_batch(
+        self,
+        jobs: tuple[MemoryJobRecord, ...],
+        *,
+        history_keep_count: int,
+    ) -> MemoryConsolidationBatch: ...
+
+    async def commit_consolidation(self, batch: MemoryConsolidationBatch) -> None: ...
 
     async def complete_jobs(self, jobs: tuple[MemoryJobRecord, ...]) -> None: ...
 

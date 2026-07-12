@@ -498,7 +498,7 @@ class SQLAlchemyWorkRepository:
             .on_conflict_do_update(
                 index_elements=[Conversation.channel, Conversation.external_chat_id],
                 set_={
-                    "metadata": Conversation.meta.concat(insert_statement.excluded.meta),
+                    "metadata": Conversation.meta.concat(insert_statement.excluded.metadata),
                     "updated_at": datetime.now(UTC),
                 },
             )

@@ -134,3 +134,42 @@ class MemoryCheckpointRecord:
 
 class MemoryJobLeaseLost(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class MemoryMessage:
+    id: int
+    conversation_id: int
+    sequence: int
+    role: str
+    origin: str
+    content: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class MemoryConsolidationBatch:
+    scope: MemoryScopeRecord
+    conversation_id: int
+    jobs: tuple[MemoryJobRecord, ...]
+    messages: tuple[MemoryMessage, ...]
+    through_sequence: int
+    summary_messages: tuple[MemoryMessage, ...] = ()
+    summary_through_sequence: int | None = None
+
+
+@dataclass(frozen=True)
+class MemoryCandidate:
+    record_key: str
+    tier: MemoryTier
+    content: str
+    tags: tuple[str, ...]
+    evidence_message_ids: tuple[int, ...]
+    happened_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class StableMemoryDecision:
+    candidate_index: int
+    action: Literal["add", "ignore", "replace", "reinforce"]
+    target_record_key: str | None = None

@@ -31,13 +31,14 @@ The remaining built-ins are registered but progressively disclosed:
 | Workspace read | `read_file`, `list_dir` |
 | Workspace mutation | `write_file`, `edit_file` |
 | Command execution | `shell`, `task_output`, `task_stop` |
+| Read-only host inspection | `list_processes` |
 | Delivered conversation lookup | `search_messages`, `fetch_messages` |
 
 Profile ceilings are explicit and immutable:
 
 | Profile | Hidden capabilities it may unlock |
 | --- | --- |
-| `passive` | web, workspace read/write, commands, message lookup |
+| `passive` | web, workspace read/write, commands, process inspection, message lookup |
 | `scheduled` | web, workspace read, message lookup |
 | `proactive` | web |
 | `drift` | web, message lookup |
@@ -58,14 +59,23 @@ successfully delivered assistant messages only. Pending, failed, and `system_err
 messages remain invisible, matching normal history semantics.
 
 `FileWorkspace` resolves every file and command path under `JASI_TOOL_WORKSPACE`, including
-symbolic links. Writes use atomic replacement and exact-match edits. `shell` never invokes Bash:
-it executes one command from a fixed allowlist with a restricted environment, rejects operators,
-redirects, traversal, and executable options, and binds background task access to the creating
-session. `web_fetch` accepts public HTTP(S) targets only, revalidates every redirect, rejects URL
+symbolic links. Writes use atomic replacement and exact-match edits. `shell` accepts general Bash
+syntax but launches it inside Bubblewrap with only the configured workspace writable. A typed
+policy pipeline parses commands, rejects sandbox-control and opaque dispatch, classifies risk,
+and rewrites standard deletion commands into `.jasi-trash`. Background task access remains bound
+to the creating session. Policy is not treated as containment; mount, PID/network namespaces,
+environment clearing, resource limits, timeout, and process-tree cleanup enforce containment.
+
+`list_processes` does not use model-authored Shell. Its adapter runs a fixed read-only `ps` or
+PowerShell query and returns no command-line arguments, executable paths, or environment values.
+`web_fetch` accepts public HTTP(S) targets only, revalidates every redirect, rejects URL
 credentials and non-global DNS results, and caps downloaded and rendered content.
 Clash-style fake-IP DNS is supported only through the explicit
 `JASI_WEB_ALLOW_FAKE_IP_DNS=true` compatibility setting. Even then, literal reserved-IP URLs
 remain blocked.
+
+See [Shell Sandbox Architecture](shell-sandbox.md) for the command threat model and degradation
+behavior.
 
 `RuntimeProfile.allowed_tools` is the chain-wide ceiling. `base_tools` is the safe subset shown
 on the first model step. Runtime fails during assembly when a Profile refers to an unregistered

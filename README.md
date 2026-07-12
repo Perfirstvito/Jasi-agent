@@ -29,11 +29,18 @@ visible on the next model step. Runtime applies every reveal request generically
 special-cases the search tool. See [Tool MVP Architecture](docs/architecture/tool-mvp.md).
 
 The built-in catalog contains public web search/fetch, workspace-confined file read/list/write/
-edit, allowlisted foreground/background commands, and delivered-message search/fetch. Passive
-chat may unlock the complete catalog. Scheduled, proactive, and drift Profiles receive narrower
-read-only subsets. `JASI_TOOL_WORKSPACE` confines all file and command access; Shell executes one
-allowlisted program directly without a shell, pipes, redirects, executable options, or paths
-outside that workspace.
+edit, sandboxed foreground/background Bash, delivered-message search/fetch, and read-only process
+inspection. Passive chat may unlock the complete catalog. Scheduled, proactive, and drift
+Profiles receive narrower read-only subsets.
+
+`JASI_TOOL_WORKSPACE` is the only writable Shell mount. Bash supports pipelines, redirects,
+subcommands, interpreters, and normal system tools inside Bubblewrap, while the repository,
+`.env`, host filesystem, host processes, and sensitive environment variables remain unavailable.
+Network is disabled by default and requires `JASI_SHELL_NETWORK_ENABLED=true`. Standard deletion
+commands are rewritten into `.jasi-trash`; command policy remains an audit/rewrite layer, while
+the OS sandbox is the actual security boundary. `list_processes` separately exposes process name,
+PID, CPU, and memory for either Windows or the Jasi runtime without command lines or environment
+variables. See [Shell Sandbox Architecture](docs/architecture/shell-sandbox.md).
 
 `web_fetch` rejects non-public DNS targets. Networks using Clash-style fake-IP DNS may opt in
 with `JASI_WEB_ALLOW_FAKE_IP_DNS=true`; this permits domain resolutions in `198.18.0.0/15` but
@@ -199,6 +206,9 @@ the fetched updates have been durably enqueued.
 
 Startup checks the database connection and Alembic revision. It exits with a clear
 error if the migration is missing or stale.
+
+Sandboxed Shell requires `bubblewrap` and `prlimit` on Linux/WSL. If either is unavailable, Jasi
+continues running but Shell calls are rejected instead of falling back to unsandboxed execution.
 
 ## Telegram Bot Setup
 
